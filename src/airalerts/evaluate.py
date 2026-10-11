@@ -98,8 +98,8 @@ def main() -> None:
     print("\nfeature sets chosen on validation:", {k: v for k, v in summary.items() if "features" in k})
 
     # thresholds for the policies, chosen on validation
-    trval1 = pd.concat([T["train"][0], T["val"][0]])
-    trval2 = pd.concat([T["train"][1], T["val"][1]])
+    trval1 = pd.concat([T["train"][0], T["val"][0]], ignore_index=True)
+    trval2 = pd.concat([T["train"][1], T["val"][1]], ignore_index=True)
     val_days = decision_days(T["train"][0], T["val"][0], T["val"][1], m2fit, feats1["20:00"])
     taus = np.round(np.arange(0.05, 0.96, 0.05), 2)
     grid = []
