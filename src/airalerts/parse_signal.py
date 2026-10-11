@@ -151,6 +151,8 @@ def to_episodes(events: pd.DataFrame, coverage_end: pd.Timestamp) -> pd.DataFram
 def _close(key, cur: Open, end, censored: bool, unit_type_: str) -> dict:
     return dict(unit=key[0], oblast=key[1], unit_type=unit_type_, started_at=cur.start, finished_at=end,
                 start_level=cur.levels[0][1], max_level=cur.max_level, n_level_changes=len(cur.levels) - 1,
+                # full level timeline, so the level *at* a given time can be read without peeking ahead
+                levels=json.dumps([(t.isoformat(), lv) for t, lv in cur.levels]),
                 censored=censored, source="telegram:UkraineAlarmSignal")
 
 
@@ -174,3 +176,14 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def level_at(levels_json: str, t: pd.Timestamp) -> str | None:
+    """Alert level in force at time t, from an episode's level timeline (None before 4 Sep 2026)."""
+    level = None
+    for ts, lv in json.loads(levels_json):
+        if pd.Timestamp(ts) <= t:
+            level = lv
+        else:
+            break
+    return level

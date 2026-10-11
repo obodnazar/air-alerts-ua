@@ -56,6 +56,7 @@ def official_unit_alerts(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.concat([kyiv, rai, obl])[["unit", "oblast", "scope", "started_at", "finished_at"]]
     out["censored"] = False
     out["max_level"] = None
+    out["levels"] = None
     out["source"] = "official"
     return out
 
@@ -63,7 +64,7 @@ def official_unit_alerts(df: pd.DataFrame) -> pd.DataFrame:
 def telegram_unit_alerts(episodes: pd.DataFrame) -> pd.DataFrame:
     e = episodes[episodes.unit_type.isin(["raion", "kyiv"])].copy()
     e["scope"] = "unit"
-    return e[["unit", "oblast", "scope", "started_at", "finished_at", "censored", "max_level", "source"]]
+    return e[["unit", "oblast", "scope", "started_at", "finished_at", "censored", "max_level", "levels", "source"]]
 
 
 @dataclass

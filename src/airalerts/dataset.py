@@ -12,6 +12,7 @@ import pandas as pd
 
 from .attacks import attack_features
 from .data import KYIV_TZ, Store, _minute
+from .parse_signal import level_at
 
 ISSUES = {"20:00": -4 * 60, "07:00": -60}  # minutes relative to 08:00 of the target day
 
@@ -81,11 +82,30 @@ def build_m1(store: Store, reports: pd.DataFrame, start: str, end: str) -> pd.Da
     return pd.DataFrame(rows)
 
 
-def build_m2(store: Store, reports: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
-    """One row per (unit, weekday) with an alert active at 08:00: time to all-clear from 08:00."""
+def _level_lookup(store: Store):
+    tg = store.raw[store.raw.levels.notna()].sort_values("started_at")
+    by_unit = {u: g for u, g in tg.groupby("unit")}
+
+    def lookup(u: str, T: pd.Timestamp) -> str:
+        g = by_unit.get(u)
+        if g is None:
+            return "unknown"
+        hit = g[(g.started_at <= T) & (g.finished_at > T)]
+        if hit.empty:
+            return "unknown"
+        return level_at(hit.iloc[-1].levels, T) or "unknown"
+
+    return lookup
+
+
+def build_m2(store: Store, reports: pd.DataFrame, start: str, end: str, all_days: bool = False) -> pd.DataFrame:
+    """One row per (unit, day) with an alert active at 08:00: time to all-clear from 08:00.
+    `level` is the alert level in force at 08:00 (yellow/red, from 4 Sep 2026; else unknown)."""
     cov_end = _minute(store.coverage[1])
+    level_of = _level_lookup(store)
+    days = list(pd.date_range(start, end, freq="D")) if all_days else weekdays(start, end)
     rows = []
-    for d in weekdays(start, end):
+    for d in days:
         T = kyiv(d, "08:00")
         m = _minute(T)
         state = {u: store.active_until(u, T) for u in store.units}
@@ -100,7 +120,7 @@ def build_m2(store: Store, reports: pd.DataFrame, start: str, end: str) -> pd.Da
             obl = [v is not None for k, v in state.items() if store.oblast_of[k] == store.oblast_of[u]]
             censored = chain_end >= cov_end or (chain_end - int(s[i])) >= 24 * 60
             rows.append(dict(
-                unit=u, oblast=store.oblast_of[u], day=d, issue_time=T,
+                unit=u, oblast=store.oblast_of[u], day=d, issue_time=T, level=level_of(u, T),
                 remaining=float(min(chain_end, cov_end) - m), event=not censored,
                 elapsed=float(elapsed),
                 night_min=store.minutes_in(u, kyiv(d, "00:00"), T),
