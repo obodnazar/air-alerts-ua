@@ -16,6 +16,7 @@ from sklearn.preprocessing import StandardScaler
 M1_FEATURES = ["active_now", "mins_since_end", "unit_min_6h", "unit_min_24h", "unit_min_7d", "night_min",
                "oblast_share_now", "country_share_now", "clim28", "markov42", "days_since_mass", "drones_7d",
                "mass_30d"]
+EXTRA = ["country_6h", "af_oblast_1h", "af_oblast_3h", "af_all_3h"]  # candidates, kept only if validation improves
 M2_FEATURES = ["elapsed", "night_min", "unit_min_7d", "oblast_share_now", "country_share_now",
                "days_since_mass", "drones_7d"]
 
@@ -69,16 +70,18 @@ def km_prob(train: pd.DataFrame, horizon: float) -> float:
     return float(1 - kmf.predict(horizon))
 
 
-def fit_m2(train: pd.DataFrame, horizon: float = 120) -> dict:
+def fit_m2(train: pd.DataFrame, horizon: float = 120, features: list[str] | None = None) -> dict:
+    feats = features or M2_FEATURES
     known = train[train.event | (train.remaining > horizon)]  # censored before the horizon: outcome unknown
-    X = known[M2_FEATURES].astype(float)
+    X = known[feats].astype(float).fillna(0)
     y = (known.remaining <= horizon).astype(int)
     logit = make_pipeline(StandardScaler(), LogisticRegression(C=1.0, max_iter=3000)).fit(X, y)
-    aft_df = train[M2_FEATURES + ["remaining", "event"]].copy()
+    aft_df = train[feats + ["remaining", "event"]].copy().fillna(0)
     aft_df["remaining"] = aft_df.remaining.clip(lower=1)
     aft = WeibullAFTFitter(penalizer=0.01).fit(aft_df, duration_col="remaining", event_col="event")
     oblast_km = {o: km_prob(g, horizon) for o, g in train.groupby("oblast") if len(g) >= 30}
-    return dict(logit=logit, aft=aft, pooled_km=km_prob(train, horizon), oblast_km=oblast_km, horizon=horizon)
+    return dict(logit=logit, aft=aft, pooled_km=km_prob(train, horizon), oblast_km=oblast_km, horizon=horizon,
+                features=feats)
 
 
 def predict_m2(fitted: dict, df: pd.DataFrame) -> pd.DataFrame:
@@ -86,10 +89,11 @@ def predict_m2(fitted: dict, df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
     out["km_pooled"] = fitted["pooled_km"]
     out["km_oblast"] = df.oblast.map(fitted["oblast_km"]).fillna(fitted["pooled_km"])
-    out["logit"] = fitted["logit"].predict_proba(df[M2_FEATURES].astype(float))[:, 1]
-    surv = fitted["aft"].predict_survival_function(df[M2_FEATURES].astype(float), times=[h])
+    X = df[fitted["features"]].astype(float).fillna(0)
+    out["logit"] = fitted["logit"].predict_proba(X)[:, 1]
+    surv = fitted["aft"].predict_survival_function(X, times=[h])
     out["weibull_aft"] = 1 - surv.T.iloc[:, 0].to_numpy()
-    out["aft_median"] = fitted["aft"].predict_median(df[M2_FEATURES].astype(float)).to_numpy()
+    out["aft_median"] = fitted["aft"].predict_median(X).to_numpy()
     return out
 
 

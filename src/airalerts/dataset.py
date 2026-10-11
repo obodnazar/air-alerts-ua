@@ -33,7 +33,7 @@ def state_matrix(store: Store, days: list[pd.Timestamp], hhmm: str) -> pd.DataFr
     )
 
 
-def build_m1(store: Store, reports: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+def build_m1(store: Store, reports: pd.DataFrame, start: str, end: str, threats=None) -> pd.DataFrame:
     hist_start = (pd.Timestamp(start) - pd.Timedelta(days=60)).strftime("%Y-%m-%d")
     alldays = list(pd.date_range(hist_start, end, freq="D"))
     y08 = state_matrix(store, alldays, "08:00")
@@ -48,6 +48,7 @@ def build_m1(store: Store, reports: pd.DataFrame, start: str, end: str) -> pd.Da
             country_share = state_now.mean()
             obl_share = state_now.groupby(oblast_units.reindex(state_now.index)).mean()
             atk = attack_features(reports, T)
+            country_6h = np.mean([store.minutes_in(x, T - pd.Timedelta(hours=6), T) for x in store.units]) / 360
             # history strictly before the target day's 08:00, and before T
             hist = [x for x in alldays if x < d and x >= d - pd.Timedelta(days=42)]
             h28 = [x for x in hist if x >= d - pd.Timedelta(days=28)]
@@ -77,9 +78,19 @@ def build_m1(store: Store, reports: pd.DataFrame, start: str, end: str) -> pd.Da
                     markov42=markov,
                     dow=d.weekday(),
                     days_since_mass=atk["days_since_mass"], drones_7d=atk["drones_7d"], mass_30d=atk["mass_30d"],
+                    country_6h=country_6h,
+                    **threat_counts(threats, store.oblast_of[u], T),
                     available_at=max(T, atk["attack_available_at"]) if pd.notna(atk["attack_available_at"]) else T,
                 ))
     return pd.DataFrame(rows)
+
+
+def threat_counts(threats, oblast: str, T: pd.Timestamp) -> dict:
+    """Air Force threat posts about the oblast in the last 1h/3h, and nationwide in the last 3h (before T)."""
+    if threats is None:
+        return dict(af_oblast_1h=np.nan, af_oblast_3h=np.nan, af_all_3h=np.nan)
+    return dict(af_oblast_1h=threats.count(oblast, T, 60), af_oblast_3h=threats.count(oblast, T, 180),
+                af_all_3h=threats.count_all(T, 180))
 
 
 def _level_lookup(store: Store):
@@ -98,7 +109,7 @@ def _level_lookup(store: Store):
     return lookup
 
 
-def build_m2(store: Store, reports: pd.DataFrame, start: str, end: str, all_days: bool = False) -> pd.DataFrame:
+def build_m2(store: Store, reports: pd.DataFrame, start: str, end: str, all_days: bool = False, threats=None) -> pd.DataFrame:
     """One row per (unit, day) with an alert active at 08:00: time to all-clear from 08:00.
     `level` is the alert level in force at 08:00 (yellow/red, from 4 Sep 2026; else unknown)."""
     cov_end = _minute(store.coverage[1])
@@ -111,6 +122,7 @@ def build_m2(store: Store, reports: pd.DataFrame, start: str, end: str, all_days
         state = {u: store.active_until(u, T) for u in store.units}
         country_share = np.mean([v is not None for v in state.values()])
         atk = attack_features(reports, T)
+        country_6h = np.mean([store.minutes_in(x, T - pd.Timedelta(hours=6), T) for x in store.units]) / 360
         for u, chain_end in state.items():
             if chain_end is None:
                 continue
@@ -127,6 +139,7 @@ def build_m2(store: Store, reports: pd.DataFrame, start: str, end: str, all_days
                 unit_min_7d=store.minutes_in(u, T - pd.Timedelta(days=7), T),
                 oblast_share_now=float(np.mean(obl)), country_share_now=float(country_share),
                 dow=d.weekday(), days_since_mass=atk["days_since_mass"], drones_7d=atk["drones_7d"],
+                country_6h=country_6h, **threat_counts(threats, store.oblast_of[u], T),
                 available_at=T,
             ))
     df = pd.DataFrame(rows)

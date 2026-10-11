@@ -21,6 +21,7 @@ import pandas as pd
 
 from . import models as M
 from . import policies as P
+from .airforce import ThreatIndex, load_threat_posts
 from .attacks import load_reports
 from .data import build_store, eligible_units
 from .dataset import build_m1, build_m2
@@ -29,19 +30,19 @@ WIN = dict(train=("2025-12-15", "2026-07-31"), val=("2026-08-01", "2026-08-31"),
 RES, FIG = Path("results"), Path("figures")
 
 
-def load_tables(store, reports, units):
+def load_tables(store, reports, units, threats=None):
     t = {}
     for k, (a, b) in WIN.items():
-        m1 = build_m1(store, reports, a, b)
-        m2 = build_m2(store, reports, a, b)
+        m1 = build_m1(store, reports, a, b, threats=threats)
+        m2 = build_m2(store, reports, a, b, threats=threats)
         t[k] = (m1[m1.unit.isin(units)].reset_index(drop=True), m2[m2.unit.isin(units)].reset_index(drop=True))
         print(f"{k}: M1 rows {len(t[k][0])} (alert@08 {t[k][0].y.mean():.3f}), M2 rows {len(t[k][1])}")
     return t
 
 
-def run_m1(train, evalset, issue, tag):
+def run_m1(train, evalset, issue, tag, features=M.M1_FEATURES):
     tr, ev = train[train.issue == issue], evalset[evalset.issue == issue]
-    fit = M.fit_m1(tr)
+    fit = M.fit_m1(tr, features=features)
     pr = M.predict_m1(fit, ev)
     for c in ("logit", "hgb"):
         M.guard(ev.y, pr[c], f"M1 {issue} {c}")
@@ -62,24 +63,39 @@ def main() -> None:
     reports = load_reports(Path("data/raw/kaggle/missile_attacks_daily.csv"))
     units = eligible_units(store)
     print(f"eligible units: {len(units)}")
-    T = load_tables(store, reports, units)
+    af = Path("data/raw/telegram/kpszsu.jsonl")
+    threats = ThreatIndex(load_threat_posts(af)) if af.exists() else None
+    print("Air Force threat posts:", "loaded" if threats else "not available")
+    T = load_tables(store, reports, units, threats)
     summary = dict(units=len(units), windows=WIN)
 
-    # ---------------- validation: model choice ----------------
+    # ---------------- validation: model and feature choice ----------------
+    feats1 = {}
     for issue in ("20:00", "07:00"):
-        _, _, tab, sub = run_m1(T["train"][0], T["val"][0], issue, "val")
-        tab.to_csv(RES / f"val_m1_{issue.replace(':', '')}.csv")
-        print(f"\nVAL M1 issue {issue}\n", tab.round(4).to_string())
-    m2fit = M.fit_m2(T["train"][1])
-    m2val = M.predict_m2(m2fit, T["val"][1])
-    tab2 = M.table(T["val"][1].clear_by_10, m2val, "km_pooled")
-    tab2.to_csv(RES / "val_m2.csv")
-    print("\nVAL M2 (all-clear by 10:00)\n", tab2.round(4).to_string())
+        res = {}
+        for name, f in (("base", M.M1_FEATURES), ("base+extra", M.M1_FEATURES + M.EXTRA)):
+            _, _, tab, _ = run_m1(T["train"][0], T["val"][0], issue, "val", features=f)
+            res[name] = (tab, f)
+            tab.to_csv(RES / f"val_m1_{issue.replace(':', '')}_{name}.csv")
+            print(f"\nVAL M1 issue {issue} [{name}]\n", tab.round(4).to_string())
+        best = min(res, key=lambda k: res[k][0].loc["logit", "brier"])
+        feats1[issue] = res[best][1]
+        summary[f"m1_features_{issue}"] = best
+    feats2, best2 = M.M2_FEATURES, "base"
+    for name, f in (("base", M.M2_FEATURES), ("base+extra", M.M2_FEATURES + M.EXTRA)):
+        fit = M.fit_m2(T["train"][1], features=f)
+        tab2 = M.table(T["val"][1].clear_by_10, M.predict_m2(fit, T["val"][1]), "km_pooled")
+        tab2.to_csv(RES / f"val_m2_{name}.csv")
+        print(f"\nVAL M2 (all-clear by 10:00) [{name}]\n", tab2.round(4).to_string())
+        if name == "base" or tab2.loc["logit", "brier"] < best_b2:
+            feats2, best2, best_b2, m2fit = f, name, tab2.loc["logit", "brier"], fit
+    summary["m2_features"] = best2
+    print("\nfeature sets chosen on validation:", {k: v for k, v in summary.items() if "features" in k})
 
     # thresholds for the policies, chosen on validation
     trval1 = pd.concat([T["train"][0], T["val"][0]])
     trval2 = pd.concat([T["train"][1], T["val"][1]])
-    val_days = decision_days(T["train"][0], T["val"][0], T["val"][1], m2fit)
+    val_days = decision_days(T["train"][0], T["val"][0], T["val"][1], m2fit, feats1["20:00"])
     taus = np.round(np.arange(0.05, 0.96, 0.05), 2)
     grid = []
     for tp in taus:
@@ -100,7 +116,7 @@ def main() -> None:
         raise SystemExit(f"coverage gap {store.gap}: finish the Telegram scrape before the test run")
     summary["test"] = {}
     for issue in ("20:00", "07:00"):
-        fit, pr, tab, sub = run_m1(trval1, T["test"][0], issue, "test")
+        fit, pr, tab, sub = run_m1(trval1, T["test"][0], issue, "test", features=feats1[issue])
         ev = T["test"][0][T["test"][0].issue == issue]
         base = ["climatology", "persistence", "rolling_markov"]
         strongest = tab.loc[base, "brier"].idxmin()
@@ -116,7 +132,7 @@ def main() -> None:
         reliability_plot(ev.y, pr, issue)
         print(f"\nTEST M1 {issue}\n", tab.round(4).to_string(), "\nBSS vs", strongest, boot)
 
-    m2fit_tv = M.fit_m2(trval2)
+    m2fit_tv = M.fit_m2(trval2, features=feats2)
     ev2 = T["test"][1]
     pr2 = M.predict_m2(m2fit_tv, ev2)
     tab2 = M.table(ev2.clear_by_10, pr2, "km_pooled")
@@ -127,7 +143,7 @@ def main() -> None:
     print("\nTEST M2\n", tab2.round(4).to_string(), boot2)
 
     # policies on test
-    test_days = decision_days(trval1, T["test"][0], T["test"][1], m2fit_tv)
+    test_days = decision_days(trval1, T["test"][0], T["test"][1], m2fit_tv, feats1["20:00"])
     hist_days = pd.concat([decision_days(None, *T[k], None, only_outcomes=True) for k in ("train", "val")])
     cp_by_unit = P.best_control_point(hist_days)
     pol = {
@@ -146,7 +162,7 @@ def main() -> None:
     json.dump(summary, open(RES / "summary.json", "w"), indent=2, default=str, ensure_ascii=False)
 
 
-def decision_days(hist_m1, m1, m2, m2fit, only_outcomes=False):
+def decision_days(hist_m1, m1, m2, m2fit, features=M.M1_FEATURES, only_outcomes=False):
     """Per (unit, day): alert at 08:00, all-clear hour, P(remote day) at 20:00, P(clear by 10) at 08:00.
     The 20:00 model is fitted on hist_m1 only (data before the evaluated window)."""
     d = m1[m1.issue == "20:00"][["unit", "oblast", "day", "y"]].rename(columns={"y": "alert"}).copy()
@@ -154,7 +170,7 @@ def decision_days(hist_m1, m1, m2, m2fit, only_outcomes=False):
     d["clear_h"] = [clear.get((u, x), np.nan) for u, x in zip(d.unit, d.day)]
     if only_outcomes:
         return d.reset_index(drop=True)
-    fit = M.fit_m1(hist_m1[hist_m1.issue == "20:00"])
+    fit = M.fit_m1(hist_m1[hist_m1.issue == "20:00"], features=features)
     p20 = M.predict_m1(fit, m1[m1.issue == "20:00"])["logit"].to_numpy()
     d["p_remote_20"] = p20 * (1 - m2fit["pooled_km"])
     pc = dict(zip(zip(m2.unit, m2.day), M.predict_m2(m2fit, m2)["logit"].to_numpy()))
