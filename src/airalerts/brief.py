@@ -22,22 +22,22 @@ from .dataset import build_m1, build_m2, kyiv
 DOW = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
 
 
-def make_brief(day: str, units: list[str] | None = None, tau_plan: float | None = None) -> pd.DataFrame:
+def make_brief(day: str, units: list[str] | None = None, tau_plan: float | None = None, issue: str = "20:00") -> pd.DataFrame:
     store = build_store(Path("data/raw/vadimkin/official_data_uk.csv"), Path("data/interim/telegram_episodes.parquet"))
     reports = load_reports(Path("data/raw/kaggle/missile_attacks_daily.csv"))
     keep = eligible_units(store)
     d = pd.Timestamp(day)
-    T = kyiv(d - pd.Timedelta(days=1), "20:00")
+    T = kyiv(d - pd.Timedelta(days=1), "20:00") if issue == "20:00" else kyiv(d, issue)
     if store.coverage[1] < T - pd.Timedelta(hours=1):
         print(f"WARNING: data end at {store.coverage[1]}, brief issue time {T}: update the scrape first")
     last_full = (d - pd.Timedelta(days=2)).strftime("%Y-%m-%d")
     hist1 = build_m1(store, reports, "2025-12-15", last_full)
     hist2 = build_m2(store, reports, "2025-12-15", last_full)
     hist1, hist2 = hist1[hist1.unit.isin(keep)], hist2[hist2.unit.isin(keep)]
-    fit1 = M.fit_m1(hist1[hist1.issue == "20:00"])
+    fit1 = M.fit_m1(hist1[hist1.issue == issue])
     fit2 = M.fit_m2(hist2)
     now = build_m1(store, reports, day, day)
-    now = now[(now.issue == "20:00") & now.unit.isin(units or keep)].reset_index(drop=True)
+    now = now[(now.issue == issue) & now.unit.isin(units or keep)].reset_index(drop=True)
     p = M.predict_m1(fit1, now)
     if tau_plan is None:
         s = Path("results/summary.json")
@@ -49,14 +49,14 @@ def make_brief(day: str, units: list[str] | None = None, tau_plan: float | None 
     ))
     out["p_remote_day"] = out.p_alert_08 * (1 - out.p_clear_by_10)
     out["advice"] = out.p_remote_day.map(lambda x: "розгляньте дистанційний день" if x > tau_plan else "плануйте очний день")
-    out.attrs.update(day=d, issue=T, tau=tau_plan, data_end=store.coverage[1])
+    out.attrs.update(day=d, issue=T, issue_label=issue, tau=tau_plan, data_end=store.coverage[1])
     return out.sort_values("p_alert_08", ascending=False)
 
 
 def render(b: pd.DataFrame) -> str:
     d = b.attrs["day"]
     lines = [f"# Шкільний ранок · {DOW[d.weekday()]} {d:%d.%m.%Y}",
-             f"Прогноз станом на 20:00 напередодні. Дані до {b.attrs['data_end'].tz_convert('Europe/Kyiv'):%d.%m %H:%M}. "
+             f"Прогноз станом на {b.attrs['issue'].tz_convert('Europe/Kyiv'):%d.%m %H:%M}. Дані до {b.attrs['data_end'].tz_convert('Europe/Kyiv'):%d.%m %H:%M}. "
              "Не замінює офіційних сигналів.", ""]
     for r in b.itertuples():
         lines.append(

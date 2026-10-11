@@ -100,7 +100,9 @@ class Open:
 
 
 def load_posts(path: Path) -> pd.DataFrame:
-    rows = [json.loads(l) for l in path.open(encoding="utf-8") if l.strip()]
+    """Read the main scrape plus any live top-up files next to it (UkraineAlarmSignal*.jsonl)."""
+    files = sorted(path.parent.glob(path.stem + "*.jsonl")) or [path]
+    rows = [json.loads(l) for f in files for l in f.open(encoding="utf-8") if l.strip()]
     df = pd.DataFrame(rows).drop_duplicates("id").sort_values("id")
     df["published_at"] = pd.to_datetime(df["published_at"], utc=True)
     return df
