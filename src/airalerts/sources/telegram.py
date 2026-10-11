@@ -79,6 +79,32 @@ def oldest_saved_id(path: Path) -> int | None:
     return min(ids) if ids else None
 
 
+def newest_saved_id(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    ids = [json.loads(line)["id"] for line in path.open(encoding="utf-8") if line.strip()]
+    return max(ids) if ids else None
+
+
+def update(channel: str, out: Path, delay: float = 1.2) -> None:
+    """Fetch posts newer than the newest saved one (walks back from the live page)."""
+    newest = newest_saved_id(out) or 0
+    before, fresh = None, []
+    while True:
+        posts = [p for p in parse_page(fetch_page(channel, before), channel) if p["id"] > newest]
+        if before is not None:
+            posts = [p for p in posts if p["id"] < before]
+        if not posts:
+            break
+        fresh += posts
+        before = min(p["id"] for p in posts)
+        time.sleep(delay)
+    with out.open("a", encoding="utf-8") as fh:
+        for p in sorted(fresh, key=lambda p: p["id"]):
+            fh.write(json.dumps(p, ensure_ascii=False) + "\n")
+    print(f"update: {len(fresh)} new posts after id {newest}", flush=True)
+
+
 def scrape(channel: str, since: str, out: Path, delay: float = 1.2, max_pages: int = 10_000) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     before = oldest_saved_id(out)
@@ -126,13 +152,19 @@ def scrape(channel: str, since: str, out: Path, delay: float = 1.2, max_pages: i
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("channel")
-    ap.add_argument("--since", required=True, help="stop once posts are older than this UTC date")
+    ap.add_argument("--since", help="stop once posts are older than this UTC date")
+    ap.add_argument("--update", action="store_true", help="fetch only posts newer than the newest saved")
     ap.add_argument("--out", type=Path, help="default: data/raw/telegram/<channel>.jsonl")
     ap.add_argument("--delay", type=float, default=1.2)
     ap.add_argument("--max-pages", type=int, default=10_000)
     args = ap.parse_args()
     out = args.out or Path("data/raw/telegram") / f"{args.channel}.jsonl"
-    scrape(args.channel, args.since, out, args.delay, args.max_pages)
+    if args.update:
+        update(args.channel, out, args.delay)
+    else:
+        if not args.since:
+            ap.error("--since is required unless --update")
+        scrape(args.channel, args.since, out, args.delay, args.max_pages)
 
 
 if __name__ == "__main__":
