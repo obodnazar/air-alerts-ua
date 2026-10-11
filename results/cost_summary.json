@@ -1,0 +1,35 @@
+{
+  "zoning": {
+    "unit_mornings": 13416,
+    "alert_at_08_actual": 0.15004472271914132,
+    "alert_at_08_oblast_wide": 0.294200954084675,
+    "mornings_saved": 1934
+  },
+  "levels": [
+    {
+      "level": "yellow",
+      "school_minutes": 146524.18333333376,
+      "share_of_school_time": 0.13977047402828693
+    },
+    {
+      "level": "red",
+      "school_minutes": 125481.38333333317,
+      "share_of_school_time": 0.11969759551790786
+    }
+  ],
+  "control_points_mid": {
+    "in_person_9": 6.113905784138343,
+    "remote_days_9": 0.10614192009540845,
+    "limbo_9": 0.1503756708407871,
+    "in_person_10": 6.2631961836613,
+    "remote_days_10": 0.07298747763864046,
+    "limbo_10": 0.23984496124031005,
+    "in_person_11": 6.3328026237328565,
+    "remote_days_11": 0.05330948121645796,
+    "limbo_11": 0.30225998807394155,
+    "in_person_12": 6.362448817332537,
+    "remote_days_12": 0.04126416219439475,
+    "limbo_12": 0.3500139137348439
+  },
+  "n_mid": 65
+}
