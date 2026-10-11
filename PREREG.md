@@ -57,4 +57,4 @@ Raions with at least one raion-level alert of their own between 15 Dec 2025 and 
 4. Kaggle night reports become available at 09:00 Kyiv on the day the report window ends, not at `time_start`.
 
 ## Changes after registration
-(none yet)
+1. **12 Oct, 00:50, before the test run: unit rule refined.** The registered rule ("at least one own raion-level alert") did not remove occupied raions: the official feed gives them their own rows, identical to their neighbours' (all Donetsk raions have exactly 694 alerts; Berdianskyi, Melitopolskyi and Zaporizkyi share one series). Now excluded: Donetsk oblast as a whole (no raion zoning, near-permanent alert) and an explicit list of occupied raions in `data.py`. Also fixed: three raions renamed in 2024 (old names in the official feed, new ones in Telegram) are mapped to the new names.
