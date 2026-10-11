@@ -19,3 +19,7 @@ venv/
 # local / secrets
 .env
 .DS_Store
+
+# results are small and are the point of the repo: always track them
+!results/
+!results/**
