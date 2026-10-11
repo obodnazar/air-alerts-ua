@@ -37,8 +37,10 @@ def policies() -> None:
              "C_call_at_08": "C · рішення о 08:00", "D_best_cp_per_raion": "D · своя контр. точка",
              "C+D": "C + D", "oracle": "знає майбутнє"}
     p = p.rename(index=names)
+    if (p.loc[names["B_plan_at_20"], ["in_person_h", "limbo_h"]] == p.loc[names["A_status_quo_cp10"], ["in_person_h", "limbo_h"]]).all():
+        p = p.drop(names["B_plan_at_20"]).rename(index={names["A_status_quo_cp10"]: "A = B · як зараз\n(план з вечора ні разу не виграв)"})
     fig, ax = plt.subplots(figsize=(7, 3.8))
-    ax.scatter(p.limbo_h * 60, p.in_person_h, s=60, color=["#9e9e9e", "#bdbdbd", "#5b8def", "#e4572e", "#8e44ad", "#2e7d32"])
+    ax.scatter(p.limbo_h * 60, p.in_person_h, s=60, color=["#9e9e9e", "#5b8def", "#e4572e", "#8e44ad", "#2e7d32"][: len(p)] if len(p) == 5 else None)
     for n, r in p.iterrows():
         ax.annotate(n, (r.limbo_h * 60, r.in_person_h), xytext=(6, 4), textcoords="offset points", fontsize=9)
     ax.set_xlabel("хвилин невизначеності після 08:00 (середнє на район-день)")
