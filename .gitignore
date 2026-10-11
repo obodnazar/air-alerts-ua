@@ -1,0 +1,21 @@
+# data never goes to git: it is re-downloadable and some of it is large
+data/raw/
+data/interim/
+data/processed/
+*.parquet
+*.csv
+*.jsonl
+*.zip
+*.pkl
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# local / secrets
+.env
+.DS_Store
