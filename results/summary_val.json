@@ -14,9 +14,21 @@
       "2026-10-09"
     ]
   },
-  "m1_features_20:00": "base+extra",
-  "m1_features_07:00": "base+extra",
-  "m2_features": "base+extra",
+  "m1_features_20:00": {
+    "chosen": "base",
+    "brier_gain": -0.0006261184678866047,
+    "se": 0.00039674354993099795
+  },
+  "m1_features_07:00": {
+    "chosen": "base",
+    "brier_gain": 7.153300442486336e-05,
+    "se": 0.0006894322013282171
+  },
+  "m2_features": {
+    "chosen": "base",
+    "brier_gain": 0.0006534054911771293,
+    "se": 0.0015671601728617299
+  },
   "policy_tau_from_val": {
     "B_plan_20": 0.35,
     "C_call_08": 0.35
