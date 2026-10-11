@@ -105,9 +105,10 @@ def update(channel: str, out: Path, delay: float = 1.2) -> None:
     print(f"update: {len(fresh)} new posts after id {newest}", flush=True)
 
 
-def scrape(channel: str, since: str, out: Path, delay: float = 1.2, max_pages: int = 10_000) -> None:
+def scrape(channel: str, since: str, out: Path, delay: float = 1.2, max_pages: int = 10_000,
+           start_before: int | None = None) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
-    before = oldest_saved_id(out)
+    before = oldest_saved_id(out) or start_before
     since_dt = datetime.fromisoformat(since).replace(tzinfo=timezone.utc)
     pages = saved = failures = 0
     backoff = delay
@@ -154,6 +155,7 @@ def main() -> None:
     ap.add_argument("channel")
     ap.add_argument("--since", help="stop once posts are older than this UTC date")
     ap.add_argument("--update", action="store_true", help="fetch only posts newer than the newest saved")
+    ap.add_argument("--before", type=int, help="start below this post id (to scrape a range in parallel)")
     ap.add_argument("--out", type=Path, help="default: data/raw/telegram/<channel>.jsonl")
     ap.add_argument("--delay", type=float, default=1.2)
     ap.add_argument("--max-pages", type=int, default=10_000)
@@ -164,7 +166,7 @@ def main() -> None:
     else:
         if not args.since:
             ap.error("--since is required unless --update")
-        scrape(args.channel, args.since, out, args.delay, args.max_pages)
+        scrape(args.channel, args.since, out, args.delay, args.max_pages, args.before)
 
 
 if __name__ == "__main__":

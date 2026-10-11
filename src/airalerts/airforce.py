@@ -83,7 +83,8 @@ SUMMARY = re.compile(r"збито/подавлено|у ніч на|загало
 
 
 def load_threat_posts(path: Path) -> pd.DataFrame:
-    rows = [json.loads(l) for l in path.open(encoding="utf-8") if l.strip()]
+    files = sorted(path.parent.glob(path.stem + "*.jsonl")) or [path]  # parallel range scrapes
+    rows = [json.loads(l) for f in files for l in f.open(encoding="utf-8") if l.strip()]
     df = pd.DataFrame(rows).drop_duplicates("id")
     df["published_at"] = pd.to_datetime(df.published_at, utc=True)
     df = df[~df.edited]  # edit time is unknown: an edited post may contain later information
