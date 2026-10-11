@@ -131,7 +131,7 @@ def build_store(official_csv: Path, telegram_episodes: Path, switch: pd.Timestam
     tg_start = tg.started_at.min() + pd.Timedelta(hours=24)  # warm-up: alerts open at scrape start are unseen
     tg_end = tg.finished_at.max()
     if tg_start > switch:
-        raise ValueError(f"Telegram data starts {tg_start}, after the switch {switch}; scrape further back")
+        print(f"WARNING: Telegram data starts {tg_start}, after the switch {switch}: gap in coverage")
     a = official_unit_alerts(off)
     a = a[a.started_at < switch]
     b = telegram_unit_alerts(tg)
@@ -154,8 +154,11 @@ def build_store(official_csv: Path, telegram_episodes: Path, switch: pd.Timestam
         e = np.concatenate([_mins(own.finished_at), _mins(cov.finished_at)])
         starts[u], ends[u] = _merge(s, e)
     coverage = (REGIME_START, tg_end)
+    store_gap = (switch, tg_start) if tg_start > switch else None
     print(f"store: {len(starts)} units, coverage {coverage[0]} → {coverage[1]}, switch {switch}")
-    return Store(starts, ends, oblast_of, coverage, allr)
+    st = Store(starts, ends, oblast_of, coverage, allr)
+    st.gap = store_gap
+    return st
 
 
 def compare_sources(official_csv: Path, telegram_episodes: Path, a: str, b: str, tol_min: int = 3) -> pd.DataFrame:
