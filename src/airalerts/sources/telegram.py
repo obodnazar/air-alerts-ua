@@ -65,7 +65,9 @@ def parse_page(page: str, channel: str) -> list[dict]:
                 "published_at": published.group(1),
                 # Edited posts show only their latest text; keep the flag so they
                 # can be excluded from features (the edit time is not exposed).
-                "edited": "tgme_widget_message_edited" in chunk or ">edited<" in chunk,
+                # marker looks like <span class="tgme_widget_message_meta">edited &nbsp;<a ...
+                # (first version looked for a different string and flagged nothing; fixed 12 Oct)
+                "edited": bool(re.search(r'tgme_widget_message_meta">\s*edited', chunk)),
                 "text": _clean(body.group(1)) if body else "",
             }
         )
