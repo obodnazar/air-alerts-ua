@@ -19,7 +19,9 @@ import pandas as pd
 from .parse_signal import norm
 
 KYIV_TZ = "Europe/Kyiv"
-SWITCH = pd.Timestamp("2026-09-01 00:00", tz=KYIV_TZ).tz_convert("UTC")
+# Official feed has an outage from 29 Aug (0 alerts on 30 Aug - 1 Sep vs ~170/day in the volunteer feed)
+# and stops on 7 Sep; Telegram is used from 28 Aug. See PREREG.md, change 3.
+SWITCH = pd.Timestamp("2026-08-28 00:00", tz=KYIV_TZ).tz_convert("UTC")
 REGIME_START = pd.Timestamp("2025-12-15", tz="UTC")  # nationwide raion-level alerts
 MAX_EPISODE = pd.Timedelta(hours=24)
 # Raions renamed in 2024 (decommunisation law): the official feed keeps old names, Telegram uses new ones.
