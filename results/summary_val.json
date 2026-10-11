@@ -14,8 +14,11 @@
       "2026-10-09"
     ]
   },
+  "m1_features_20:00": "base+extra",
+  "m1_features_07:00": "base+extra",
+  "m2_features": "base+extra",
   "policy_tau_from_val": {
     "B_plan_20": 0.35,
-    "C_call_08": 0.05
+    "C_call_08": 0.35
   }
 }

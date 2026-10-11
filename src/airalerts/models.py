@@ -138,3 +138,21 @@ def reliability(y, p, bins: int = 10) -> pd.DataFrame:
     df = pd.DataFrame(dict(y=np.asarray(y, int), p=p))
     df["bin"] = pd.cut(df.p, np.linspace(0, 1, bins + 1), include_lowest=True)
     return df.groupby("bin", observed=True).agg(n=("y", "size"), mean_p=("p", "mean"), observed=("y", "mean"))
+
+
+def keep_extra(y, p_base, p_extra, days, block: int = 3, n: int = 500, seed: int = 0) -> tuple[bool, float, float]:
+    """1-SE rule from PREREG: keep the richer feature set only if its Brier gain exceeds one bootstrap SE."""
+    rng = np.random.default_rng(seed)
+    df = pd.DataFrame(dict(d=pd.to_datetime(days), e=(np.asarray(p_extra) - np.asarray(y, float)) ** 2
+                           - (np.asarray(p_base) - np.asarray(y, float)) ** 2))
+    per_day = df.groupby("d").e.agg(["sum", "size"])
+    udays = per_day.index.to_numpy()
+    blocks = [udays[i:i + block] for i in range(0, len(udays), block)]
+    diffs = []
+    for _ in range(n):
+        pick = np.concatenate([blocks[i] for i in rng.integers(0, len(blocks), len(blocks))])
+        g = per_day.loc[pick]
+        diffs.append(g["sum"].sum() / g["size"].sum())
+    gain = -float(df.e.mean())
+    se = float(np.std(diffs))
+    return gain > se, gain, se

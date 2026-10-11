@@ -74,22 +74,27 @@ def main() -> None:
     for issue in ("20:00", "07:00"):
         res = {}
         for name, f in (("base", M.M1_FEATURES), ("base+extra", M.M1_FEATURES + M.EXTRA)):
-            _, _, tab, _ = run_m1(T["train"][0], T["val"][0], issue, "val", features=f)
-            res[name] = (tab, f)
+            _, pr, tab, _ = run_m1(T["train"][0], T["val"][0], issue, "val", features=f)
+            res[name] = (tab, f, pr)
             tab.to_csv(RES / f"val_m1_{issue.replace(':', '')}_{name}.csv")
             print(f"\nVAL M1 issue {issue} [{name}]\n", tab.round(4).to_string())
-        best = min(res, key=lambda k: res[k][0].loc["logit", "brier"])
+        ev = T["val"][0][T["val"][0].issue == issue]
+        keep, gain, se = M.keep_extra(ev.y, res["base"][2].logit, res["base+extra"][2].logit, ev.day)
+        best = "base+extra" if keep else "base"
         feats1[issue] = res[best][1]
-        summary[f"m1_features_{issue}"] = best
-    feats2, best2 = M.M2_FEATURES, "base"
+        summary[f"m1_features_{issue}"] = dict(chosen=best, brier_gain=gain, se=se)
+    fits2, preds2 = {}, {}
     for name, f in (("base", M.M2_FEATURES), ("base+extra", M.M2_FEATURES + M.EXTRA)):
-        fit = M.fit_m2(T["train"][1], features=f)
-        tab2 = M.table(T["val"][1].clear_by_10, M.predict_m2(fit, T["val"][1]), "km_pooled")
+        fits2[name] = M.fit_m2(T["train"][1], features=f)
+        preds2[name] = M.predict_m2(fits2[name], T["val"][1])
+        tab2 = M.table(T["val"][1].clear_by_10, preds2[name], "km_pooled")
         tab2.to_csv(RES / f"val_m2_{name}.csv")
         print(f"\nVAL M2 (all-clear by 10:00) [{name}]\n", tab2.round(4).to_string())
-        if name == "base" or tab2.loc["logit", "brier"] < best_b2:
-            feats2, best2, best_b2, m2fit = f, name, tab2.loc["logit", "brier"], fit
-    summary["m2_features"] = best2
+    keep, gain, se = M.keep_extra(T["val"][1].clear_by_10, preds2["base"].logit, preds2["base+extra"].logit,
+                                  T["val"][1].day)
+    best2 = "base+extra" if keep else "base"
+    feats2, m2fit = fits2[best2]["features"], fits2[best2]
+    summary["m2_features"] = dict(chosen=best2, brier_gain=gain, se=se)
     print("\nfeature sets chosen on validation:", {k: v for k, v in summary.items() if "features" in k})
 
     # thresholds for the policies, chosen on validation
