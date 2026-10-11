@@ -58,3 +58,7 @@ Raions with at least one raion-level alert of their own between 15 Dec 2025 and 
 
 ## Changes after registration
 1. **12 Oct, 00:50, before the test run: unit rule refined.** The registered rule ("at least one own raion-level alert") did not remove occupied raions: the official feed gives them their own rows, identical to their neighbours' (all Donetsk raions have exactly 694 alerts; Berdianskyi, Melitopolskyi and Zaporizkyi share one series). Now excluded: Donetsk oblast as a whole (no raion zoning, near-permanent alert) and an explicit list of occupied raions in `data.py`. Also fixed: three raions renamed in 2024 (old names in the official feed, new ones in Telegram) are mapped to the new names.
+2. **12 Oct, ~01:10, before the test run: two candidate features added, kept only if they improve validation (Aug 2026).**
+   - (a) `country_night`: mean share of the night (00:00–07:00) under alert across units. Motivated by a check: after mass nights, alerts still active at 07:00 end before 08:00 more often (56% vs 64% still active), while new morning alerts are not rarer.
+   - (b) Air Force (@kpszsu) threat posts that mention the unit's oblast in the last 1 h and 3 h before the issue time, by publish time.
+   - Anonymous monitoring channels and Russian statements are not used: too sparse (3 MiG-31K posts in 5 weeks) and unreliable.
