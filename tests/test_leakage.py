@@ -90,3 +90,19 @@ def test_truncation_check_bites_on_future_feature(world):
     full = [store.minutes_in(u, T, T + ahead) for u in store.units]
     cut = [st.minutes_in(u, T, T + ahead) for u in store.units]
     assert full != cut
+
+
+AF = Path("data/raw/telegram/kpszsu.jsonl")
+
+
+@pytest.mark.skipif(not AF.exists(), reason="Air Force posts not scraped")
+def test_airforce_counts_use_only_posts_before_issue():
+    from airalerts.airforce import ThreatIndex, load_threat_posts
+
+    posts = load_threat_posts(AF)
+    T = posts.published_at.quantile(0.5)
+    full, cut = ThreatIndex(posts), ThreatIndex(posts[posts.published_at < T])
+    for ob in posts.oblast.unique()[:10]:
+        for minutes in (60, 180):
+            assert full.count(ob, T, minutes) == cut.count(ob, T, minutes)
+    assert full.count_all(T, 180) == cut.count_all(T, 180)
