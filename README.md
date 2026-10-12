@@ -79,7 +79,7 @@ Everything a model sees is computed **as of the issue time**. Plain-language wal
 
 Every change after registration is listed there with its time and reason, including one crashed test run.
 
-**Tests:** [tests/test_units.py](tests/test_units.py) (7, no data needed: the parser on real post formats, the MoE rule, the level in force at a given time, the guard) and **leakage controls** in [tests/test_leakage.py](tests/test_leakage.py) (8, run on the downloaded data):
+**Tests:** [tests/test_units.py](tests/test_units.py) (8, no data needed: the parser on real post formats, the MoE rule, the level in force at a given time, the guard) and **leakage controls** in [tests/test_leakage.py](tests/test_leakage.py) (8, run on the downloaded data):
 - `available_at <= issue_time` on every row;
 - features recomputed on a world **truncated at the issue time** equal the full-data features;
 - a **planted leak** must trip the guard (AUC > 0.995 aborts);
@@ -208,7 +208,7 @@ export PYTHONPATH=src
 .venv/bin/python -m airalerts.sources.telegram kpszsu --since 2025-12-01        # optional
 .venv/bin/python -m airalerts.sources.kaggle                                     # Air Force daily reports
 .venv/bin/python -m airalerts.parse_signal
-.venv/bin/python -m pytest -q                       # 15 tests: 7 need no data, 8 leakage tests use the data
+.venv/bin/python -m pytest -q                       # 16 tests: 8 need no data, 8 leakage tests use the data
 .venv/bin/python -m airalerts.evaluate              # validation only
 .venv/bin/python -m airalerts.evaluate --test       # the registered test run
 .venv/bin/python -m airalerts.levels && .venv/bin/python -m airalerts.cost && .venv/bin/python -m airalerts.figures
