@@ -78,3 +78,13 @@ Everything below was designed **after** the test results were seen. It is report
    - Both now feed the brief.
 7. **Occupied raions from the DeepState map instead of a hand list** (`geo.py`): raions with >50% of their area occupied on 31 Aug 2026 (map history from cyterat/deepstate-map-data, raion boundaries from OPORA/map_2020). Outside Donetsk and Luhansk oblasts it selects exactly the seven raions of the hand list, so units and all results are unchanged; a test keeps the two in agreement.
 8. **Air Force posts re-checked where they should matter most**: the 07:00 forecast for raions with no alert at 07:00 (new alerts), validation August, n=1 861. Brier 0.05257 with the posts vs 0.05251 without: no gain (−6e-5, SE 6e-4). Interpretation: alerts are declared from the same radar picture the Air Force posts describe, so by 07:00 that information is already in "is the oblast / the country under alert now".
+9. **Later evening forecast and neighbouring raions (decided on validation, product unchanged).**
+   - 20:00 vs 21:30 vs 22:00, Brier on August:
+     - 0.0820 / 0.0829 / 0.0807;
+     - on test (secondary): 0.1435 / 0.1485 / 0.1451.
+     - No consistent gain: 22:00 is better on August, worse on test; 21:30 is worse on both.
+   - Adjacent raions (from raion boundaries):
+     - at 20:00 the gain is +0.4% on August, formally above 1 SE, and +0.1% on test;
+     - at 07:00 it is below 1 SE, and worse on test.
+     - The oblast and country shares already carry the spatial signal.
+   - Kept the simpler model: 20:00, no neighbour features. Code: `experiments.py`; results: `results/posthoc_evening_neighbours.csv`.

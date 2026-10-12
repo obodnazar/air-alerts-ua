@@ -33,18 +33,19 @@ def state_matrix(store: Store, days: list[pd.Timestamp], hhmm: str) -> pd.DataFr
     )
 
 
-def build_m1(store: Store, reports: pd.DataFrame, start: str, end: str, threats=None) -> pd.DataFrame:
+def build_m1(store: Store, reports: pd.DataFrame, start: str, end: str, threats=None,
+             evening: str = "20:00", neighbours: dict | None = None) -> pd.DataFrame:
     hist_start = (pd.Timestamp(start) - pd.Timedelta(days=60)).strftime("%Y-%m-%d")
     alldays = list(pd.date_range(hist_start, end, freq="D"))
     y08 = state_matrix(store, alldays, "08:00")
-    s20 = state_matrix(store, alldays, "20:00")
+    s20 = state_matrix(store, alldays, evening)
     s07 = state_matrix(store, alldays, "07:00")
     oblast_units = pd.Series(store.oblast_of)
     rows = []
     for d in weekdays(start, end):
         prev = d - pd.Timedelta(days=1)
-        for issue, T in (("20:00", kyiv(prev, "20:00")), ("07:00", kyiv(d, "07:00"))):
-            state_now = s20.loc[prev] if issue == "20:00" else s07.loc[d]
+        for issue, T in ((evening, kyiv(prev, evening)), ("07:00", kyiv(d, "07:00"))):
+            state_now = s20.loc[prev] if issue == evening else s07.loc[d]
             country_share = state_now.mean()
             obl_share = state_now.groupby(oblast_units.reindex(state_now.index)).mean()
             atk = attack_features(reports, T)
@@ -56,7 +57,7 @@ def build_m1(store: Store, reports: pd.DataFrame, start: str, end: str, threats=
                 active = bool(state_now[u])
                 last_end = store.last_end_before(u, T)
                 # rolling-Markov: P(alert at 08:00 next | same state at the issue hour), 42 days
-                if issue == "20:00":
+                if issue == evening:
                     pairs = [(bool(s20.at[x - pd.Timedelta(days=1), u]), bool(y08.at[x, u]))
                              for x in hist if x - pd.Timedelta(days=1) in s20.index]
                 else:
@@ -79,6 +80,7 @@ def build_m1(store: Store, reports: pd.DataFrame, start: str, end: str, threats=
                     dow=d.weekday(),
                     days_since_mass=atk["days_since_mass"], drones_7d=atk["drones_7d"], mass_30d=atk["mass_30d"],
                     country_6h=country_6h,
+                    **neighbour_features(store, neighbours, u, state_now, T),
                     **threat_counts(threats, store.oblast_of[u], T),
                     available_at=max(T, atk["attack_available_at"]) if pd.notna(atk["attack_available_at"]) else T,
                 ))
@@ -146,3 +148,14 @@ def build_m2(store: Store, reports: pd.DataFrame, start: str, end: str, all_days
     df["clear_by_10"] = df.remaining <= 120
     df["clear_by_11"] = df.remaining <= 180
     return df
+
+
+def neighbour_features(store: Store, neighbours: dict | None, u: str, state_now: pd.Series, T: pd.Timestamp) -> dict:
+    """Share of adjacent raions under alert at T and their mean alert minutes in the last 6 h."""
+    if not neighbours:
+        return dict(nb_share_now=np.nan, nb_min_6h=np.nan)
+    nb = [x for x in neighbours.get(u, []) if x in state_now.index]
+    if not nb:
+        return dict(nb_share_now=0.0, nb_min_6h=0.0)
+    return dict(nb_share_now=float(state_now[nb].mean()),
+                nb_min_6h=float(np.mean([store.minutes_in(x, T - pd.Timedelta(hours=6), T) for x in nb])))

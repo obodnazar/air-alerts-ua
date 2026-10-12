@@ -176,6 +176,7 @@ These were designed after seeing the test and the live morning, so they are repo
 | The registered all-clear model was trained before the yellow/red reform and failed on test | The 08:00 version uses the **level in force at 08:00** and the time already elapsed, on post-reform data | **+27.6%** [+20.4, +32.5]. It now gives the brief's 08:00 update per raion: "wait for the control point" or "call the remote day now" |
 | Occupied raions were a hand-made list | Share of each raion's area occupied on 31 Aug 2026, from the [DeepState map history](https://github.com/cyterat/deepstate-map-data) and [OPORA raion boundaries](https://github.com/OPORA/map_2020) ([geo.py](src/airalerts/geo.py)) | Selects exactly the hand-listed raions; a test keeps them in agreement |
 | Full reproduction needed ~1.5 h of Telegram scraping | Parsed alerts committed as a 0.5 MB snapshot; `scripts/reproduce.sh` | **1 min 27 s** from a fresh clone, identical numbers |
+| Would a later evening forecast (21:30, 22:00) or neighbouring raions help? | Tested on validation ([experiments.py](src/airalerts/experiments.py)) | No consistent gain: 22:00 better on August, worse on test; neighbours +0.1–0.4%. Kept the simpler model |
 | Did Air Force posts fail only because they were pooled? | Re-checked on new alerts only (no alert at 07:00) | Still no gain (Brier 0.05257 vs 0.05251). Alerts are declared from the same radar picture, so the posts add nothing new by 07:00 |
 
 ## Evening brief

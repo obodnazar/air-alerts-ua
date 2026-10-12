@@ -68,3 +68,23 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+KYIV_NEIGHBOURS = ["Бучанський район", "Вишгородський район", "Броварський район", "Бориспільський район",
+                   "Обухівський район", "Фастівський район"]  # Kyiv city is not in the raion layer
+
+
+def neighbours(out: Path = Path("data/snapshot/raion_neighbours.json")) -> dict:
+    """Raions whose boundaries touch (small tolerance for simplified polygons)."""
+    from shapely.geometry import shape
+    from shapely.validation import make_valid
+
+    feats = json.load(open(GEO / "rayon-ukraine-s-v5.geojson", encoding="utf-8"))["features"]
+    names = [RENAMES.get(norm(f["properties"]["rayon"]), norm(f["properties"]["rayon"])) for f in feats]
+    geoms = [make_valid(shape(f["geometry"])).buffer(0.01) for f in feats]
+    nb = {n: sorted(names[j] for j in range(len(names)) if j != i and g.intersects(geoms[j])) for i, (n, g) in enumerate(zip(names, geoms))}
+    nb["Київ"] = KYIV_NEIGHBOURS
+    for r in KYIV_NEIGHBOURS:
+        nb[r] = sorted(set(nb.get(r, [])) | {"Київ"})
+    out.write_text(json.dumps(nb, ensure_ascii=False, indent=0), encoding="utf-8")
+    return nb
