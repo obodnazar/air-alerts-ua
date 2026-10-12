@@ -32,3 +32,4 @@ results/live/bot_*.csv
 data/bot/
 .env*
 !data/snapshot/*.csv
+!data/snapshot/*.gz

@@ -1,0 +1,10 @@
+{
+  "name": "shkilnyi-ranok-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  }
+}

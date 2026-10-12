@@ -1,0 +1,14 @@
+name = "shkilnyi-ranok"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# every 5 minutes; the code decides by Kyiv local time what is due (handles the 25 Oct DST switch)
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "shkilnyi-ranok"
+database_id = "eb7dfd4f-fd37-4b86-b7fd-55c14629863e"
+
+# secrets (never in this file): TELEGRAM_BOT_TOKEN, WEBHOOK_SECRET, INGEST_SECRET

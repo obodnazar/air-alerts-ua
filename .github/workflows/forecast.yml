@@ -1,0 +1,39 @@
+name: forecast
+# Computes the bot's forecast and pushes it to the Cloudflare Worker. Two UTC times per slot cover
+# summer (EEST, UTC+3) and winter (EET, UTC+2); the script itself checks Kyiv time and skips the wrong one.
+on:
+  schedule:
+    - cron: "5 17 * * 0-4"   # 20:05 Kyiv in summer time
+    - cron: "5 18 * * 0-4"   # 20:05 Kyiv in winter time
+    - cron: "2 5 * * 1-5"    # 08:02 Kyiv in summer time
+    - cron: "2 6 * * 1-5"    # 08:02 Kyiv in winter time
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "kind and day, e.g. 'evening 2026-10-13' (empty = decide by Kyiv time)"
+        required: false
+concurrency: { group: forecast, cancel-in-progress: false }
+permissions: { contents: read }
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -q -r requirements.txt
+      - name: restore scraped posts from the previous run
+        uses: actions/cache/restore@v4
+        with: { path: data/raw/telegram, key: posts-${{ github.run_id }}, restore-keys: posts- }
+      - name: download datasets
+        run: PYTHONPATH=src python -m airalerts.sources.vadimkin && PYTHONPATH=src python -m airalerts.sources.kaggle
+      - name: forecast and push
+        env:
+          INGEST_URL: ${{ secrets.INGEST_URL }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+        run: PYTHONPATH=src python -m airalerts.botapp.publish ${{ inputs.force && format('--force {0}', inputs.force) || '' }}
+      - name: keep scraped posts for the next run
+        if: always()
+        uses: actions/cache/save@v4
+        with: { path: data/raw/telegram, key: posts-${{ github.run_id }} }
