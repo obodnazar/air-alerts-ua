@@ -313,7 +313,7 @@ test("a forecast is delivered right after /ingest, not at the next tick", async 
 import { parsePage, toEvents, applyEvents, unitType, unescapeHtml } from "../src/signal.js";
 import { kyivOffset, kyivHour, kyivToUtc, coverageShare, forecastOne, bucketOf, hourRisk } from "../src/hourly.js";
 import { scrape, liveState, PAGES } from "../src/live.js";
-import { SCRAPE_CRON, invalidHourly, invalidAlerts } from "../src/index.js";
+import { invalidHourly, invalidAlerts } from "../src/index.js";
 
 const fixture = (f) => JSON.parse(readFileSync(new URL(`./fixtures/${f}`, import.meta.url), "utf8"));
 const SIG = fixture("signal_parity.json"), HOURLY = fixture("hourly_parity.json");
@@ -610,15 +610,24 @@ test("ingest: hourly parameters and alert history need the secret, are validated
   }
 });
 
-test("schedule: the scrape cron scrapes and delivers nothing; wrangler.toml has the same cron", async () => {
-  assert.ok(readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8").includes(`"${SCRAPE_CRON}"`));
+test("schedule: every 5-minute run scrapes first; a failed scrape does not stop delivery", async () => {
   const env = { DB: fakeD1(), TELEGRAM_BOT_TOKEN: "x" };
   const real = globalThis.fetch, urls = [];
   globalThis.fetch = async (url) => { urls.push(String(url)); return new Response(PAGE); };
-  try { await worker.scheduled({ cron: SCRAPE_CRON, scheduledTime: Date.parse("2026-10-12T18:02:00Z") }, env); } finally { globalThis.fetch = real; }
+  try { await worker.scheduled({ cron: "*/5 * * * *", scheduledTime: Date.parse("2026-10-12T18:02:00Z") }, env); } finally { globalThis.fetch = real; }
   assert.deepEqual(urls, ["https://t.me/s/UkraineAlarmSignal"]);
   const meta = await new Store(env.DB).liveMeta();
   assert.equal(meta.last, 654224); assert.equal(meta.gapTo, 654204);    // first run: what came before is unknown
+
+  const store = new Store(env.DB), sent = [];
+  await store.addUnit(1, "Київ");
+  await store.saveForecast("evening", "2026-10-13", { rows, banner: "" });
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes("t.me")) return new Response("blocked", { status: 403 });
+    sent.push(JSON.parse(init.body).chat_id); return new Response(JSON.stringify({ ok: true, result: {} }));
+  };
+  try { await worker.scheduled({ cron: "*/5 * * * *", scheduledTime: Date.parse("2026-10-12T17:05:00Z") }, env); } finally { globalThis.fetch = real; }
+  assert.deepEqual(sent, [1]);                                           // 20:05 Kyiv: the forecast still went out
 });
 
 test("new keyboards fit a phone", () => {

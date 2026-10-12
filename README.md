@@ -242,7 +242,7 @@ The rule: the model is shown only where the CI is above 0 **and** both halves of
 - **With no alert now, it cannot predict the next one** better than how often there was an alert at that hour over 4 weeks. The bot then shows exactly that share, labelled as history and not as a forecast.
 - **It is too low**: 57% at 1 h against 61% observed while an alert is on. Alerts cluster more than independent starts allow. Recalibrating it would need a new period to check on.
 
-**Live data for "now".** Forecasts arrive only twice a day, too stale for "now". So the Worker reads the public web preview of @UkraineAlarmSignal (t.me/s) itself every 5 minutes, on its own cron, and keeps open and recent alerts per raion in D1. GitHub Actions still runs only twice a day: it sends the hourly parameters and the last 7 days of alerts per raion, and that history heals anything the Worker missed.
+**Live data for "now".** Forecasts arrive only twice a day, too stale for "now". So the Worker reads the public web preview of @UkraineAlarmSignal (t.me/s) itself every 5 minutes, at the start of the same cron run that delivers messages, and keeps open and recent alerts per raion in D1. GitHub Actions still runs only twice a day: it sends the hourly parameters and the last 7 days of alerts per raion, and that history heals anything the Worker missed.
 
 | Check (Workers Free plan) | Measured |
 |---|---|

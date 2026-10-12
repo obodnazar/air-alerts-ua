@@ -2,10 +2,10 @@ name = "shkilnyi-ranok"
 main = "src/index.js"
 compatibility_date = "2026-09-01"
 
-# every 5 minutes; the code decides by Kyiv local time what is due (handles the 25 Oct DST switch).
-# The second schedule reads t.me/s/UkraineAlarmSignal for the live alert state (index.js SCRAPE_CRON, must match).
+# every 5 minutes: read t.me/s/UkraineAlarmSignal for the live alert state, then deliver what is due by Kyiv local
+# time (handles the 25 Oct DST switch)
 [triggers]
-crons = ["*/5 * * * *", "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"]
+crons = ["*/5 * * * *"]
 
 [[d1_databases]]
 binding = "DB"

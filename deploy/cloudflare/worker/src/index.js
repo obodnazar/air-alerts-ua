@@ -8,9 +8,9 @@ import { kyivNow, addDays, weekday, plusMinutes } from "./util.js";
 import { scrape } from "./live.js";
 
 const SLOTS = { evening: ["20:00", "20:30", "21:00"], morning: ["08:05"] };
-export const SCRAPE_CRON = "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"; // its own invocation: own CPU and subrequest budget
 const LATE = 90;        // minutes a slot may still go out after its time
 const TG_BUDGET = 40;   // Workers Free: 50 external subrequests per invocation, shared by all slots of one run
+                        // and the live scrape (≤ PAGES = 5 fetches): 45 at most
 const CLAIM = 200;      // rows claimed per slot and run; those not sent (budget spent) go back to pending
 const COMMANDS = [{ command: "now", description: "🌙 прогноз на найближчий шкільний день" },
   { command: "settings", description: "⚙️ райони, контрольна точка, час, стиль порад" },
@@ -215,14 +215,13 @@ export default {
     return new Response("not found", { status: 404 });
   },
 
+  // One cron for both jobs: a second schedule (minutes 2, 7, 12…) was deployed on 12 Oct and never fired.
+  // The scrape goes first and cannot block delivery: its failure is logged, and live_ok is not renewed.
   async scheduled(event, env) {
-    if (event.cron === SCRAPE_CRON) {
-      try {
-        const r = await scrape(new Store(env.DB), (...a) => fetch(...a), catalog.units, event.scheduledTime);
-        if (r.posts || r.gap) console.log(JSON.stringify({ scrape: r }));
-      } catch (e) { console.log("scrape failed", String(e?.message || e).slice(0, 200)); } // live_ok not renewed: the bot says "no fresh data"
-      return;
-    }
+    try {
+      const r = await scrape(new Store(env.DB), (...a) => fetch(...a), catalog.units, event.scheduledTime);
+      if (r.posts || r.gap) console.log(JSON.stringify({ scrape: r }));
+    } catch (e) { console.log("scrape failed", String(e?.message || e).slice(0, 200)); } // the bot then says "no fresh data"
     await runDue(env, event.scheduledTime);
   },
 };
