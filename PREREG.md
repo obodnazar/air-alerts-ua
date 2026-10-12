@@ -133,3 +133,21 @@ Everything below was designed **after** the test results were seen. It is report
       - Everything is computed from data before 00:00 of the issue day, plus the state at the issue time.
     - **Backtest:** every day 15 Sep → end of data, weekdays and weekends, issued at every whole hour; Brier skill vs the baseline per lead bucket (1, 2, 3, 4–6, 7–12, 13–24, 25–47 h), separately for "alert on" and "no alert" at issue; paired block bootstrap over issue days (3-day blocks, 1 000 resamples), as for M1.
     - **Display rule:** the bot shows the model for a (state, lead bucket) only if the 95% CI of its Brier skill is above 0 on the whole backtest **and** the point estimate is above 0 in both halves (15–28 Sep, 29 Sep → end). Everywhere else it shows the plain 28-day share, labelled as history.
+    - **Result** (run once, 12 Oct ~21:00; 104 units, 28 issue days 15 Sep – 12 Oct, 2.4 M forecasts; `results/posthoc_hourly_summary.csv`):
+
+      | state at issue | lead | n | alert rate | BSS vs history [95% CI] | halves | shown |
+      |---|---|---|---|---|---|---|
+      | alert on | 1 h | 16 260 | 61% | **+16.0%** [+7.0, +24.2] | +18.8 / +13.0 | model |
+      | alert on | 2 h | 16 233 | 55% | **+8.0%** [+2.0, +13.9] | +10.4 / +5.5 | model |
+      | alert on | 3 h | 16 207 | 53% | **+4.8%** [+0.8, +9.0] | +6.3 / +3.2 | model |
+      | alert on | 4–6 h | 48 470 | 52% | **+2.3%** [+0.4, +4.3] | +3.2 / +1.3 | model |
+      | alert on | 7–12 h | 96 084 | 49% | +0.4% [+0.1, +0.6] | +0.5 / +0.3 | model |
+      | alert on | 13–47 h | 365 226 | 48% | 0.0% | ≈ 0 | history |
+      | no alert | 1 h | 53 212 | 12% | +1.9% [−1.0, +5.6] | +1.4 / +2.5 | history |
+      | no alert | 2–12 h | 580 334 | 14–16% | +0.1 … +0.8%, all CIs include 0 | | history |
+      | no alert | 13–47 h | 1 214 742 | 16–17% | 0.0% | | history |
+
+      - **What this means:** the model helps only while an alert is on, mostly for the next 1–3 hours (is it still on, or on again). With no alert now, it predicts the next one no better than "how often there was an alert at that hour in the last 4 weeks", so the bot shows that share, labelled as history.
+      - **Calibration:** the model is too low. With an alert on, it gives 57% at 1 h against 61% observed, and 47% against 55% at 2 h; with none, 8.7% against 12.0% at 1 h. Alerts cluster more than independent (Poisson) starts allow. A recalibration is the obvious next step; it is not done here, because it would be tuned on this same backtest.
+      - Weekdays and weekends, all leads pooled: +0.6% [+0.3, +1.1] and +0.3% [0.0, +0.9].
+    - **Product:** live state comes from the Worker's own 5-minute scrape of t.me/s; the parameters and the gates are published twice a day (`publish.py`), never computed by frequent GitHub Actions runs.
