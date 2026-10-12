@@ -369,3 +369,15 @@ def test_scraper_refuses_an_unexpected_page(tmp_path, monkeypatch):
             '<time datetime="2026-10-12T05:00:00+00:00"></time></div>')
     monkeypatch.setattr(tgs, "fetch_page", lambda channel, before: page)
     tgs.update("UkraineAlarmSignal", out, delay=0)                       # a quiet channel is fine
+
+
+def test_publisher_starts_early_and_waits_for_the_issue_time(monkeypatch):
+    from airalerts.botapp import publish
+
+    slept = []
+    monkeypatch.setattr(publish.time, "sleep", slept.append)
+    publish.wait_for_issue(pd.Timestamp("2026-10-13 19:43:00", tz="Europe/Kyiv"))
+    assert slept == [17 * 60 + 20]                                          # until 20:00:20
+    publish.wait_for_issue(pd.Timestamp("2026-10-13 20:05:00", tz="Europe/Kyiv"))
+    publish.wait_for_issue(pd.Timestamp("2026-10-13 18:43:00", tz="Europe/Kyiv"))  # winter cron in summer: no wait
+    assert len(slept) == 1

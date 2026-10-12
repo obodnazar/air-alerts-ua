@@ -10,9 +10,17 @@ const SLOTS = { evening: ["20:00", "20:30", "21:00"], morning: ["08:05"] };
 const LATE = 90;        // minutes a slot may still go out after its time
 const TG_BUDGET = 40;   // Workers Free: 50 external subrequests per invocation, shared by all slots of one run
 const CLAIM = 200;      // rows claimed per slot and run; those not sent (budget spent) go back to pending
-const COMMANDS = [{ command: "start", description: "обрати район" }, { command: "now", description: "прогноз на завтра" },
-  { command: "settings", description: "налаштування" }, { command: "pause", description: "пауза на канікули" },
-  { command: "stop", description: "відписатися" }, { command: "help", description: "як це працює" }];
+const COMMANDS = [{ command: "now", description: "🌙 прогноз на найближчий шкільний день" },
+  { command: "settings", description: "⚙️ райони, контрольна точка, час, стиль порад" },
+  { command: "start", description: "📍 обрати або додати район" }, { command: "pause", description: "⏸ пауза на канікули" },
+  { command: "help", description: "❓ команди і як читати прогноз" }, { command: "stop", description: "🔕 відписатися" }];
+// shown in the empty chat before /start ("What can this bot do?") and on the profile
+const SHORT = "Прогноз тривог для шкільного ранку: чи буде тривога о 08:00 і чи встигне відбій до уроків.";
+const LONG = "🌅 Шкільний ранок: прогноз повітряних тривог для шкільного дня.\n\n" +
+  "🌙 Щовечора близько 20:05: чи буде тривога о 08:00 у вашому районі і чи встигне відбій до контрольної точки школи (правило МОН).\n" +
+  "🌅 О 08:05, якщо тривога: чекати відбою чи переходити на дистанційку.\n\n" +
+  "Некомерційний студентський проєкт, модель перевірена на вересні–жовтні 2026. " +
+  "Це прогноз для планування, а не сигнал безпеки: під час тривоги йдіть в укриття.";
 
 /** Compare secrets in constant time: hash both (equal length), then XOR every byte. */
 async function sameSecret(given, expected) {
@@ -93,8 +101,19 @@ export async function deliver(store, tg, { kind, day, slot }, budget = { calls: 
   return { sent, claimed: subs.length };
 }
 
+/** One delivery run over every slot due now, with one shared budget. Called by the 5-minute cron and right after
+ *  /ingest, so a forecast that arrives at 20:02 goes out at 20:02, not at the next tick. */
+export async function runDue(env, now = Date.now()) {
+  const store = new Store(env.DB), tg = new Telegram(String(env.TELEGRAM_BOT_TOKEN || "").trim(), undefined, undefined, { maxWait: 0, tries: 1 });
+  const budget = { calls: TG_BUDGET };
+  for (const slot of dueSlots(new Date(now))) {
+    const r = await deliver(store, tg, slot, budget, now);
+    if (r.sent || r.waiting) console.log(JSON.stringify({ ...slot, ...r }));
+  }
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/telegram") {
       if (!(await sameSecret(request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "", env.WEBHOOK_SECRET))) {
@@ -118,6 +137,7 @@ export default {
       if (!body.replace && (await store.forecast(body.kind, body.day))) return Response.json({ ok: true, kept: "existing" }, { status: 409 });
       await store.saveForecast(body.kind, body.day, { rows: body.rows, banner: String(body.banner || "").slice(0, 500),
         data_end: String(body.data_end || "").slice(0, 40), checked_at: String(body.checked_at || "").slice(0, 40) });
+      ctx?.waitUntil?.(runDue(env).catch((e) => console.log("delivery after ingest failed", e.message)));
       return Response.json({ ok: true, rows: body.rows.length });
     }
     if (request.method === "POST" && url.pathname === "/setup") {
@@ -130,6 +150,8 @@ export default {
         await tg.call("setWebhook", { url: `${url.origin}/telegram`, secret_token: env.WEBHOOK_SECRET,
           allowed_updates: ["message", "callback_query"], drop_pending_updates: false });
         await tg.call("setMyCommands", { commands: COMMANDS });
+        await tg.call("setMyShortDescription", { short_description: SHORT });
+        await tg.call("setMyDescription", { description: LONG });
         const info = await tg.call("getWebhookInfo", {});
         return Response.json({ ok: true, bot: me.username, webhook: info.url, pending: info.pending_update_count });
       } catch (e) {
@@ -142,12 +164,7 @@ export default {
     return new Response("not found", { status: 404 });
   },
 
-  async scheduled(event, env, ctx) {
-    const store = new Store(env.DB), tg = new Telegram(String(env.TELEGRAM_BOT_TOKEN || "").trim(), undefined, undefined, { maxWait: 0, tries: 1 });
-    const budget = { calls: TG_BUDGET };
-    for (const slot of dueSlots(new Date(event.scheduledTime))) {
-      const r = await deliver(store, tg, slot, budget, event.scheduledTime);
-      if (r.sent || r.waiting) console.log(JSON.stringify({ ...slot, ...r }));
-    }
+  async scheduled(event, env) {
+    await runDue(env, event.scheduledTime);
   },
 };

@@ -268,3 +268,43 @@ test("parity with Python: half rounds to even, characters not UTF-16 units, whol
   await r.handle(msg("😀".repeat(100) + " Київ"));
   assert.ok(tg.calls.some((c) => c[0] === "send" && /Київ/.test(c[2] || "")));
 });
+
+test("first contact explains who we are; a returning user gets shortcuts; help has buttons", async () => {
+  const { r, tg } = setup();
+  await r.handle(msg("/start"));
+  let last = tg.calls.at(-1);
+  assert.match(last[2], /Хто ми/);
+  assert.match(last[2], /не сигнал безпеки/);
+  assert.deepEqual(buttons(last[3]).map((b) => b.callback_data), ["back", "how"]);
+  await r.handle(cb("how"));
+  assert.match(tg.calls.filter((c) => c[0] === "send").at(-1)[2], /Як читати прогноз/);
+  await r.handle(cb("back"));
+  assert.equal(tg.calls.filter((c) => c[0] === "edit").at(-1)[2], "Оберіть область:");
+  await r.handle(cb(uIdx("Київ")));
+  await r.handle(msg("/start"));
+  last = tg.calls.at(-1);
+  assert.match(last[2], /З поверненням/);
+  assert.deepEqual(buttons(last[3]).map((b) => b.callback_data), ["now", "s:root", "add", "help"]);
+  await r.handle(msg("/help"));
+  assert.match(tg.calls.at(-1)[2], /\/settings/);
+  assert.ok(tg.calls.at(-1)[3]);
+  for (const t of [ui.WELCOME, ui.HELP, ui.HOW]) assert.ok(t.length < 4096);
+});
+
+test("a forecast is delivered right after /ingest, not at the next tick", async () => {
+  const env = { DB: fakeD1(), TELEGRAM_BOT_TOKEN: "x", WEBHOOK_SECRET: "w", INGEST_SECRET: "i".repeat(32) };
+  const pending = [];
+  const real = globalThis.fetch;
+  const sent = [];
+  globalThis.fetch = async (url, init) => { sent.push(JSON.parse(init.body).chat_id); return new Response(JSON.stringify({ ok: true, result: {} })); };
+  const RealDate = Date;
+  try {
+    await new Store(env.DB).addUnit(1, "Київ");
+    globalThis.Date = class extends RealDate { constructor(...a) { super(...(a.length ? a : ["2026-10-13T17:02:00Z"])); } static now() { return RealDate.parse("2026-10-13T17:02:00Z"); } };
+    const res = await worker.fetch(new Request("https://x/ingest", { method: "POST", body: JSON.stringify({ kind: "evening", day: "2026-10-14", rows }),
+      headers: { Authorization: `Bearer ${env.INGEST_SECRET}` } }), env, { waitUntil: (p) => pending.push(p) });
+    assert.equal(res.status, 200);
+    await Promise.all(pending);
+    assert.deepEqual(sent, [1]);
+  } finally { globalThis.fetch = real; globalThis.Date = RealDate; }
+});

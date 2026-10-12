@@ -4,6 +4,8 @@
 
 Decides by Kyiv local time what to publish (DST-safe, so the workflow can fire at two UTC times):
   20:00–21:30 -> evening forecast for the next school day;  08:00–09:30 -> the 08:00 update for today.
+  19:30–20:00 and 07:30–08:00: the runner starts early (GitHub cron runs late by 5–20 min), waits for the issue time,
+  then refreshes: the forecast still uses data up to 20:00 / 08:00 only, and lands ~2 min after it.
 Anything else, or a weekend target day, exits without work. In summer both UTC crons pass the window (20:05 and
 21:05); the Worker keeps the first forecast of a day (409 for the second), so every subscriber gets the same numbers.
 
@@ -19,6 +21,7 @@ import json
 import math
 import os
 import shutil
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -27,6 +30,21 @@ import pandas as pd
 
 MAIN = Path("data/raw/telegram/UkraineAlarmSignal.jsonl")
 SNAPSHOT = Path("data/snapshot/UkraineAlarmSignal.jsonl.gz")
+
+
+EARLY = {"19:30": "20:00", "07:30": "08:00"}  # start of an early window -> the issue time it waits for
+
+
+def wait_for_issue(now: pd.Timestamp) -> pd.Timestamp:
+    """Started early: sleep until 20 s past the issue time (the freshness guard needs data refreshed after it)."""
+    hhmm = now.strftime("%H:%M")
+    for start, issue in EARLY.items():
+        if start <= hhmm < issue:
+            target = now.normalize() + pd.Timedelta(hours=int(issue[:2]), seconds=20)
+            print(f"{hhmm} Kyiv: waiting for {issue}", flush=True)
+            time.sleep((target - now).total_seconds())
+            return pd.Timestamp.now(tz="Europe/Kyiv")
+    return now
 
 
 def what_now(now: pd.Timestamp) -> tuple[str, str] | None:
@@ -83,7 +101,7 @@ def main() -> None:
     ap.add_argument("--force", nargs=2, metavar=("KIND", "DAY"))
     a = ap.parse_args()
     now = pd.Timestamp.now(tz="Europe/Kyiv")
-    job = forced(*a.force) if a.force else what_now(now)
+    job = forced(*a.force) if a.force else what_now(wait_for_issue(now))
     if not job:
         print(f"{now:%H:%M} Kyiv: nothing to publish")
         return

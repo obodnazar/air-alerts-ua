@@ -35,8 +35,11 @@ export class Router {
     if (!chat || !text || !(await this.store.allowed(chat, this.now().getTime()))) return;
     const cmd = text.split(/\s/)[0].split("@")[0].toLowerCase();
     const sub = await this.store.get(chat);
-    if (cmd === "/start") return this.tg.send(chat, ui.WELCOME, ui.oblastKeyboard(this.oblasts));
-    if (cmd === "/help") return this.tg.send(chat, ui.HELP);
+    if (cmd === "/start") {
+      if (sub && sub.units.length) return this.tg.send(chat, ui.welcomeBack(sub), ui.welcomeBackKeyboard(sub));
+      return this.tg.send(chat, ui.WELCOME, ui.welcomeKeyboard());
+    }
+    if (cmd === "/help") return this.tg.send(chat, ui.HELP, ui.helpKeyboard());
     if (cmd === "/stop") { if (sub) await this.store.set(chat, "active", 0); return this.tg.send(chat, "Відписано. Щоб повернутися, натисніть /start."); }
     if (["/settings", "/now", "/pause"].includes(cmd)) {
       if (!sub || !sub.units.length) return this.tg.send(chat, "Спершу оберіть район: /start");
@@ -44,7 +47,7 @@ export class Router {
       if (cmd === "/pause") return this.tg.send(chat, ...ui.screen("pause", sub));
       return this.tg.send(chat, await this.nowForecast(sub));
     }
-    if (text.startsWith("/")) return this.tg.send(chat, ui.HELP);
+    if (text.startsWith("/")) return this.tg.send(chat, ui.HELP, ui.helpKeyboard());
     if (msg.message_id) await this.tg.react(chat, msg.message_id);
     const hits = search(text, this.cat);
     if (hits.length && !hits[0][1]) {
@@ -64,6 +67,10 @@ export class Router {
     if (kind === "ob") {
       const n = toInt(val), ob = n !== null && n >= 0 && n < this.oblasts.length ? this.oblasts[n] : null;
       if (ob) await this.tg.edit(chat, mid, `${ob}: оберіть район`, ui.raionKeyboard(this.cat.oblasts[ob], this.index));
+    } else if (kind === "how") {
+      await this.tg.send(chat, ui.HOW, ui.howKeyboard());
+    } else if (kind === "help") {
+      await this.tg.send(chat, ui.HELP, ui.helpKeyboard());
     } else if (kind === "back" || kind === "add") {
       await this.tg.edit(chat, mid, "Оберіть область:", ui.oblastKeyboard(this.oblasts));
     } else if (kind === "u" && this.unitAt(val)) {
@@ -75,6 +82,8 @@ export class Router {
       await this.tg.edit(chat, mid, "🏫 <b>Мої райони</b> (до 3)", ui.unitsKeyboard(s.units, this.index, s.units.length < MAX_UNITS));
     } else if (kind === "now" && sub) {
       await this.tg.send(chat, await this.nowForecast(sub));
+    } else if (kind === "s" && !sub) {
+      return "Спершу оберіть район: /start";
     } else if (kind === "s" && sub) {
       if (val === "units") await this.tg.edit(chat, mid, "🏫 <b>Мої райони</b> (до 3)", ui.unitsKeyboard(sub.units, this.index, sub.units.length < MAX_UNITS));
       else if (val in ui.SCREENS) await this.tg.edit(chat, mid, ...ui.screen(val, sub));
