@@ -12,8 +12,11 @@ on:
       force:
         description: "kind and day, e.g. 'evening 2026-10-13' (empty = decide by Kyiv time)"
         required: false
-concurrency: { group: forecast, cancel-in-progress: false }
-permissions: { contents: read }
+concurrency:
+  group: forecast
+  cancel-in-progress: false
+permissions:
+  contents: read
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -21,11 +24,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12", cache: pip }
+        with:
+          python-version: "3.12"
+          cache: pip
       - run: pip install -q -r requirements.txt
       - name: restore scraped posts from the previous run
         uses: actions/cache/restore@v4
-        with: { path: data/raw/telegram, key: posts-${{ github.run_id }}, restore-keys: posts- }
+        with:
+          path: data/raw/telegram
+          key: posts-${{ github.run_id }}
+          restore-keys: posts-
       - name: download datasets
         run: PYTHONPATH=src python -m airalerts.sources.vadimkin && PYTHONPATH=src python -m airalerts.sources.kaggle
       - name: forecast and push
@@ -36,4 +44,6 @@ jobs:
       - name: keep scraped posts for the next run
         if: always()
         uses: actions/cache/save@v4
-        with: { path: data/raw/telegram, key: posts-${{ github.run_id }} }
+        with:
+          path: data/raw/telegram
+          key: posts-${{ github.run_id }}
