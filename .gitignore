@@ -27,3 +27,7 @@ venv/
 !data/snapshot/*.parquet
 !data/snapshot/*.json
 results/live/bot_*.csv
+
+# bot runtime data: subscriber chat ids and settings (personal data), never in git
+data/bot/
+.env*

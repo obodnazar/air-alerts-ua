@@ -189,8 +189,8 @@ These were designed after seeing the test and the live morning, so they are repo
 Architecture and design notes: [docs/bot-architecture.md](docs/bot-architecture.md). Code: `src/airalerts/botapp/`. Plain Python over the Telegram Bot API, with no extra libraries and no LLM.
 
 **What a user does:**
-- picks an oblast and then a raion with buttons, or types a town ("Біла Церква" → Білоцерківський район, via 1 419 hromadas placed inside raion boundaries);
-- picks the school's control point (09–12) and whether to get morning messages always or only when there is an alert.
+- follows up to **3 raions**: picks an oblast and then a raion with buttons, or types a town ("Біла Церква" → Білоцерківський район, via 1 419 hromadas placed inside raion boundaries);
+- chooses the school's control point (09–12), the evening delivery time (20:00 / 20:30 / 21:00), the advice style (careful / balanced / bold), morning messages (on alert only / every day), the news banner on or off, and a pause for holidays.
 
 **What the bot sends:**
 - **20:00** on school-day evenings: the chance of an alert at 08:00, the chance of an all-clear by *their* control point, and advice;
@@ -204,7 +204,9 @@ Architecture and design notes: [docs/bot-architecture.md](docs/bot-architecture.
 - it stays well below the ~30 messages/s limit;
 - it catches up if started late, and a failed job retries at most every 10 minutes.
 
-**Checked:** 18 offline tests with a fake Telegram (every raion reachable by buttons, town search, settings, idempotent broadcast, schedule incl. weekends, 429 retry, banner confirmation). A real-data dry run produced the evening and morning messages for three subscribers with the live banner.
+**Checked:** 18 offline tests with a fake Telegram, including 14 forged button payloads and spam, (every raion reachable by buttons, town search, settings, idempotent broadcast, schedule incl. weekends, 429 retry, banner confirmation). A real-data dry run produced the evening and morning messages for three subscribers with the live banner.
+
+Free 24/7 hosting: [deploy/README.md](deploy/README.md) (Google Cloud e2-micro, systemd). Independent audit brief: [docs/codex-audit-prompt.md](docs/codex-audit-prompt.md).
 
 ```bash
 export TELEGRAM_BOT_TOKEN=...          # from @BotFather; never committed

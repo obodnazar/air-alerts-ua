@@ -1,0 +1,20 @@
+[Unit]
+Description=Shkilnyi Ranok Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bot
+WorkingDirectory=/opt/shkilnyi-ranok/app
+Environment=PYTHONPATH=src
+EnvironmentFile=/etc/shkilnyi-ranok.env
+ExecStart=/opt/shkilnyi-ranok/app/.venv/bin/python -u -m airalerts.botapp.main
+Restart=always
+RestartSec=10
+MemoryMax=900M
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
