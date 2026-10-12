@@ -23,3 +23,5 @@ venv/
 # results are small and are the point of the repo: always track them
 !results/
 !results/**
+!data/snapshot/
+!data/snapshot/*.parquet
