@@ -1,0 +1,5 @@
+What went wrong: I began with the dataset everyone uses. It had stopped on 7 September after an outage, with 38% duplicate rows. The AI erred too: its parser lost all-clears, and one feature leaked the future.
+
+How I adjusted: I tied the forecast to the Ministry of Education school-morning rule, scraped the live alert channel, pre-registered the test and added leakage tests that catch a planted leak. A second AI, Codex, then audited the work twice; every real bug it found got a fix and a test.
+
+Why it is better: on the latest five weeks it beats the strongest baseline, and it now runs as a free Telegram bot.
