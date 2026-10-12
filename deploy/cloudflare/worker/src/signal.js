@@ -28,7 +28,9 @@ export function parsePage(html) {
     const at = Date.parse(t[1]);
     if (!Number.isFinite(at)) continue;
     const body = /<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/.exec(c);
-    out.push({ id: Number(id[1]), published_at: at, text: body ? clean(body[1]) : "" });
+    // a post with neither text nor media means the layout changed (audit round 3): flag it, the scrape refuses the page
+    const media = /tgme_widget_message_(photo|video|document|sticker|poll|voice|roundvideo)/.test(c);
+    out.push({ id: Number(id[1]), published_at: at, text: body ? clean(body[1]) : "", unreadable: !body && !media });
   }
   return out;
 }

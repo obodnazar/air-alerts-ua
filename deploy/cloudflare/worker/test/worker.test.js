@@ -232,7 +232,7 @@ test("ingest: every bad payload from the audit is refused; real forecasts pass",
   assert.equal(invalid(ok), null);
   assert.equal(invalid({ kind: "morning", day: "2026-10-13", rows: [] }), null); // a quiet morning
   const csv = (f) => {
-    const [head, ...lines] = readFileSync(new URL(`../../../../results/live/${f}`, import.meta.url), "utf8").trim().split("\n");
+    const [head, ...lines] = readFileSync(new URL(`./fixtures/${f}`, import.meta.url), "utf8").trim().split("\n");
     const cols = head.split(",");
     return lines.map((l) => Object.fromEntries(l.split(",").map((v, i) => [cols[i], cols[i] === "unit" || cols[i] === "level" ? v : Number(v)])));
   };
@@ -669,4 +669,67 @@ test("every screen reached by a button has a way back; ← Назад leads to t
   await r.handle(cb(`rmy:${K}`));
   assert.deepEqual((await store.get(1)).units, []);
   for (const d of ["home:1", "rmy:abc", "rm:99999"]) { await r.handle(cb(d)); assert.equal(tg.calls.at(-1)[0], "answer"); }
+});
+
+// ---------- audit round 3 (Codex, 12 Oct 23:00): the four high-severity cases ----------
+const post = (id, text, cls = "tgme_widget_message_text") => `<div class="tgme_widget_message_wrap"><div data-post="UkraineAlarmSignal/${id}">` +
+  `<time datetime="2026-10-13T05:0${id % 10}:00+00:00"></time><div class="${cls} js-message_text">${text}</div></div></div>`;
+const page = (...p) => async () => new Response(p.join(""));
+
+test("audit 3: a changed layout (text class renamed) stops the scrape; cursor and freshness stay", async () => {
+  const store = new Store(fakeD1());
+  await store.saveLive([{ unit: "Київ", started: 1, ended: null, level: "red", max_level: "red" }], { last: 100, ok: 5, gapTo: 0 });
+  await assert.rejects(scrape(store, page(post(101, "🟢 Київ<br/>Відбій тривоги.", "new_message_text")), catalog.units, 1e12), /layout/);
+  const m = await store.liveMeta();
+  assert.deepEqual([m.last, m.ok], [100, 5]);
+  assert.equal((await store.openAlerts()).length, 1);
+});
+
+test("audit 3: an empty older page keeps the gap (unknown posts are not 'no alerts')", async () => {
+  const store = new Store(fakeD1());
+  await store.saveLive([], { last: 100, ok: 5, gapTo: 0 });
+  let n = 0;
+  const f = async () => new Response(n++ === 0 ? post(200, "Київ<br/>повідомлення") : "<html>maintenance</html>");
+  const r = await scrape(store, f, catalog.units, 1e12);
+  assert.equal(r.gap, true);
+  assert.equal(liveState(await store.liveMeta(), null, 1e12), null);           // the bot says "no fresh data"
+});
+
+test("audit 3: a slower overlapping scrape cannot roll a newer state back", async () => {
+  const store = new Store(fakeD1());
+  await store.saveLive([], { last: 100, ok: 5, gapTo: 0 });
+  const newer = { unit: "Київ", started: 10, ended: null, level: "red", max_level: "red" };
+  assert.equal(await store.saveLive([newer], { last: 102, ok: 6, gapTo: 0 }, 100), true);   // run B
+  const older = { ...newer, level: "yellow", max_level: "yellow" };
+  assert.equal(await store.saveLive([older], { last: 101, ok: 7, gapTo: 0 }, 100), false); // slow run A
+  assert.equal((await store.liveMeta()).last, 102);
+  assert.equal((await store.openAlerts())[0].level, "red");
+});
+
+test("audit 3: the 08:05 message never says 'no alert' while one is on; stale data get a time stamp", async () => {
+  const s = { units: ["Київ"], cp: 10, style: "balanced", banner: 0, morning: "always" };
+  const on = ui.morningMessage(s, {}, "2026-10-13", "", { Київ: { on: true, elapsed: 4, level: "yellow" } });
+  assert.match(on, /Тривога зараз/); assert.match(on, /укриття/); assert.doesNotMatch(on, /Тривоги немає/);
+  assert.match(ui.morningMessage({ ...s, morning: "alert" }, {}, "2026-10-13", "", { Київ: { on: true } }), /Тривога зараз/); // even for "alert only"
+  assert.match(ui.morningMessage(s, {}, "2026-10-13", "", { Київ: null }), /О 08:00 тривоги не було/);
+  assert.match(ui.morningMessage(s, {}, "2026-10-13", "", { Київ: { on: false } }), /Тривоги немає/);
+  const r = ui.recentText(["Київ"], {}, { ok: 0, gapTo: 0 }, 1e12, 180);
+  assert.match(r, /немає підтверджених даних/); assert.doesNotMatch(r, /тривог не було|Це факти/);
+});
+
+test("audit 3: ingest kind/replace are strict; first-wins is atomic; /stop and pause apply to queued messages", async () => {
+  assert.equal(invalid({ kind: "toString", day: "2026-10-13", rows: [] }), "kind");
+  assert.equal(invalid({ kind: "evening", day: "2026-10-13", rows, replace: "false" }), "replace");
+  const store = new Store(fakeD1());
+  const [a, b] = await Promise.all([store.saveForecast("evening", "2026-10-13", { rows: [1] }, false),
+    store.saveForecast("evening", "2026-10-13", { rows: [2] }, false)]);
+  assert.deepEqual([a, b], [true, false]);
+  assert.deepEqual((await store.forecast("evening", "2026-10-13")).rows, [1]);
+  const s2 = new Store(fakeD1()), tg = new FakeTG({ broken: [1, 2] });
+  await fill(s2, 2);
+  await s2.saveForecast("evening", "2026-10-13", { rows, banner: "" });
+  await deliver(s2, tg, EV);                                                   // both fail, stay pending
+  await s2.set(1, "active", 0); await s2.pause(2, "2026-10-20");
+  tg.broken.clear();
+  assert.equal((await deliver(s2, tg, EV)).sent, 0);
 });

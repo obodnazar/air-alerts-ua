@@ -36,3 +36,6 @@ worker_secrets.env
 .wrangler/
 !data/snapshot/*.csv
 !data/snapshot/*.gz
+
+# Worker test fixtures (small, no personal data)
+!deploy/cloudflare/worker/test/fixtures/*.csv

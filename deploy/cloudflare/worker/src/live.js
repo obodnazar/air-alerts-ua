@@ -23,8 +23,9 @@ export async function scrape(store, fetchFn, units, now = Date.now(), pages = PA
     const posts = parsePage(await res.text());
     if (!posts.length) {
       if (p === 0) throw new Error("t.me: no posts parsed from the live page");
-      reached = true; break;
+      break; // an empty older page is a block page, not the start of the channel: keep the gap (audit round 3)
     }
+    if (posts.some((x) => x.unreadable)) throw new Error("t.me: a post without text or media; layout changed?");
     const oldest = Math.min(...posts.map((x) => x.id));
     oldestSeen = oldest;
     const newer = posts.filter((x) => x.id > meta.last && (before === null || x.id < before));
@@ -44,8 +45,9 @@ export async function scrape(store, fetchFn, units, now = Date.now(), pages = PA
     for (const r of await store.openAlerts()) (open[r.unit] ||= []).push(r);
     changed = applyEvents(open, toEvents(fresh), (u) => serve.has(u));
   }
-  await store.saveLive(changed, { last, ok: now, gapTo });
-  return { posts: fresh.length, changed: changed.length, gap: gapTo > 0 };
+  // compare-and-swap on the cursor: if another run (or /ingest) moved it meanwhile, this run's view is old; drop it
+  const applied = await store.saveLive(changed, { last, ok: now, gapTo }, meta.last);
+  return { posts: fresh.length, changed: applied ? changed.length : 0, gap: gapTo > 0, applied };
 }
 
 /** What the bot may say about "now" in a raion: null if the live data are stale or incomplete. */

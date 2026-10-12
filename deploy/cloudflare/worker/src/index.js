@@ -4,6 +4,7 @@ import { Telegram, Blocked, RateLimited } from "./telegram.js";
 import { Router } from "./router.js";
 import { catalog } from "./catalog.js";
 import * as ui from "./ui.js";
+import { liveState } from "./live.js";
 import { kyivNow, addDays, weekday, plusMinutes } from "./util.js";
 import { scrape } from "./live.js";
 
@@ -47,7 +48,8 @@ const FIELDS = { evening: ["p_alert_08", "usual", ...CPS], morning: CPS };
 /** The /ingest body, checked field by field; returns an error string or null. Mirrors forecasts.py's tables. */
 export function invalid(body, units = new Set(catalog.units)) {
   if (!body || typeof body !== "object") return "body";
-  if (!(body.kind in FIELDS)) return "kind";
+  if (typeof body.kind !== "string" || !Object.hasOwn(FIELDS, body.kind)) return "kind"; // not "toString"
+  if (body.replace !== undefined && typeof body.replace !== "boolean") return "replace";
   if (!isDay(body.day)) return "day";
   if (!Array.isArray(body.rows) || body.rows.length > units.size) return "rows";
   if (body.kind === "evening" && !body.rows.length) return "empty evening forecast"; // a morning with no alerts is valid
@@ -125,10 +127,18 @@ export async function deliver(store, tg, { kind, day, slot }, budget = { calls: 
   const subs = await store.claim(kind, day, slot, token, now, CLAIM);
   if (!subs.length) return { sent: 0 };
   const rows = Object.fromEntries(f.rows.map((r) => [r.unit, r]));
+  // morning: what is true at sending time, not only at 08:00 (two D1 queries, once per slot and run)
+  let live = {};
+  if (kind === "morning") {
+    const [meta, open] = await Promise.all([store.liveMeta(), store.openAlerts()]);
+    const byUnit = Object.fromEntries(open.map((r) => [r.unit, r]));
+    const units = new Set(subs.flatMap((s) => s.units));
+    for (const u of units) live[u] = liveState(meta, byUnit[u], now);
+  }
   const outcome = {};
   let sent = 0;
   for (const sub of subs) {
-    const text = kind === "evening" ? ui.eveningMessage(sub, rows, day, f.banner) : ui.morningMessage(sub, rows, day, f.banner);
+    const text = kind === "evening" ? ui.eveningMessage(sub, rows, day, f.banner) : ui.morningMessage(sub, rows, day, f.banner, live);
     if (!text) { outcome[sub.chat_id] = "skipped"; continue; } // e.g. morning without an alert in their raions
     if (budget.calls <= 0 || budget.stop) continue;           // back to pending
     budget.calls--;
@@ -185,9 +195,10 @@ export default {
       if (bad) return Response.json({ ok: false, error: bad }, { status: 400 });
       // first version wins: the workflow fires at two UTC times (summer/winter), and every subscriber of a day
       // must get the same numbers. A manual re-run passes replace: true.
-      if (!body.replace && (await store.forecast(body.kind, body.day))) return Response.json({ ok: true, kept: "existing" }, { status: 409 });
-      await store.saveForecast(body.kind, body.day, { rows: body.rows, banner: String(body.banner || "").slice(0, 500),
-        data_end: String(body.data_end || "").slice(0, 40), checked_at: String(body.checked_at || "").slice(0, 40) });
+      // atomic: the insert itself decides who was first, so two racing POSTs cannot both win (audit round 3)
+      const saved = await store.saveForecast(body.kind, body.day, { rows: body.rows, banner: String(body.banner || "").slice(0, 500),
+        data_end: String(body.data_end || "").slice(0, 40), checked_at: String(body.checked_at || "").slice(0, 40) }, body.replace === true);
+      if (!saved) return Response.json({ ok: true, kept: "existing" }, { status: 409 });
       ctx?.waitUntil?.(runDue(env).catch((e) => console.log("delivery after ingest failed", e.message)));
       return Response.json({ ok: true, rows: body.rows.length });
     }

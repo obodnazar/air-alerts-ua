@@ -381,3 +381,13 @@ def test_publisher_starts_early_and_waits_for_the_issue_time(monkeypatch):
     publish.wait_for_issue(pd.Timestamp("2026-10-13 20:05:00", tz="Europe/Kyiv"))
     publish.wait_for_issue(pd.Timestamp("2026-10-13 18:43:00", tz="Europe/Kyiv"))  # winter cron in summer: no wait
     assert len(slept) == 1
+
+
+def test_publisher_early_wait_on_dst_days(monkeypatch):
+    from airalerts.botapp import publish
+
+    slept = []
+    monkeypatch.setattr(publish.time, "sleep", slept.append)
+    for t in ["2026-10-25 19:41", "2026-10-25 07:41", "2027-03-28 19:41"]:  # 25-hour and 23-hour days
+        publish.wait_for_issue(pd.Timestamp(t, tz="Europe/Kyiv"))
+    assert slept == [19 * 60 + 20] * 3

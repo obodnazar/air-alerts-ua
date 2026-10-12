@@ -43,7 +43,8 @@ def wait_for_issue(now: pd.Timestamp) -> pd.Timestamp:
     hhmm = now.strftime("%H:%M")
     for start, issue in EARLY.items():
         if start <= hhmm < issue:
-            target = now.normalize() + pd.Timedelta(hours=int(issue[:2]), seconds=20)
+            # local wall-clock time, not midnight + N hours: on 25 Oct (25 h) that landed at 19:00 (audit round 3)
+            target = pd.Timestamp(f"{now.date()} {issue}:20", tz="Europe/Kyiv")
             print(f"{hhmm} Kyiv: waiting for {issue}", flush=True)
             time.sleep((target - now).total_seconds())
             return pd.Timestamp.now(tz="Europe/Kyiv")

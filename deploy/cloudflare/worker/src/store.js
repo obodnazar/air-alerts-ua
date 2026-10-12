@@ -51,7 +51,9 @@ export class Store {
   /** Claim up to `limit` pending rows with this run's token; a row claimed by a run that died is free again after its lease. */
   async claim(kind, day, slot, token, now, limit, leaseMs = 15 * 60000) {
     await this.q(`UPDATE outbox SET token=?1, lease=?2 WHERE rowid IN (SELECT rowid FROM outbox
-      WHERE kind=?3 AND day=?4 AND slot=?5 AND state='pending' AND (token IS NULL OR lease < ?6) LIMIT ?7)`,
+      WHERE kind=?3 AND day=?4 AND slot=?5 AND state='pending' AND (token IS NULL OR lease < ?6)
+        AND EXISTS (SELECT 1 FROM subs s WHERE s.chat_id = outbox.chat_id AND s.active = 1
+          AND (s.paused_until IS NULL OR s.paused_until < ?4)) LIMIT ?7)`,
     token, now + leaseMs, kind, day, slot, now, limit).run();
     const subs = (await this.q("SELECT s.* FROM subs s JOIN outbox o ON o.chat_id=s.chat_id WHERE o.token=?", token).all()).results;
     const units = (await this.q(`SELECT u.chat_id, u.unit FROM units u JOIN outbox o ON o.chat_id=u.chat_id
@@ -76,9 +78,11 @@ export class Store {
     await this.q("INSERT INTO state VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, value).run();
     return value;
   }
-  async saveForecast(kind, day, body) {
-    await this.q("INSERT INTO forecasts VALUES (?, ?, ?, ?) ON CONFLICT(kind, day) DO UPDATE SET body=excluded.body, received=excluded.received",
-      kind, day, JSON.stringify(body), new Date().toISOString()).run();
+  /** replace=false: first version wins, atomically (returns false if one was already there). */
+  async saveForecast(kind, day, body, replace = true) {
+    const r = await this.q(`INSERT INTO forecasts VALUES (?, ?, ?, ?) ON CONFLICT(kind, day) DO ${replace
+      ? "UPDATE SET body=excluded.body, received=excluded.received" : "NOTHING"}`, kind, day, JSON.stringify(body), new Date().toISOString()).run();
+    return r.meta.changes === 1;
   }
   async forecast(kind, day) {
     const r = await this.q("SELECT body FROM forecasts WHERE kind=? AND day=?", kind, day).first();
@@ -107,18 +111,21 @@ export class Store {
     const sql = "SELECT * FROM alerts WHERE ended IS NULL" + (units ? " AND unit IN (SELECT value FROM json_each(?))" : "") + " ORDER BY started";
     return (await (units ? this.q(sql, JSON.stringify(units)) : this.q(sql)).all()).results;
   }
-  /** Write what a scrape changed and its bookkeeping, in one batch (two statements). */
-  async saveLive(rows, meta) {
-    await this.db.batch([
+  /** Write what a scrape changed and its bookkeeping in one batch, only if the cursor is still `prev`
+   *  (compare-and-swap: a slower overlapping run cannot roll a newer state back). Returns whether it applied. */
+  async saveLive(rows, meta, prev = null) {
+    const cur = "(?2 IS NULL OR coalesce((SELECT value FROM state WHERE key='live_last_id'), '0') = ?2)";
+    const res = await this.db.batch([
       ...(rows.length ? [this.q(`INSERT INTO alerts (unit, started, ended, level, max_level)
         SELECT json_extract(value, '$.unit'), json_extract(value, '$.started'), json_extract(value, '$.ended'),
-          json_extract(value, '$.level'), json_extract(value, '$.max_level') FROM json_each(?) WHERE true
+          json_extract(value, '$.level'), json_extract(value, '$.max_level') FROM json_each(?1) WHERE ${cur}
         ON CONFLICT(unit, started) DO UPDATE SET ended=coalesce(excluded.ended, alerts.ended), level=excluded.level,
-          max_level=excluded.max_level`, JSON.stringify(rows))] : []),
-      this.q(`INSERT INTO state (key, value) SELECT key, value FROM json_each(?) WHERE true
+          max_level=excluded.max_level`, JSON.stringify(rows), prev == null ? null : String(prev))] : []),
+      this.q(`INSERT INTO state (key, value) SELECT key, value FROM json_each(?1) WHERE ${cur}
         ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-      JSON.stringify({ live_last_id: String(meta.last), live_ok: String(meta.ok), live_gap_to: String(meta.gapTo) })),
+      JSON.stringify({ live_last_id: String(meta.last), live_ok: String(meta.ok), live_gap_to: String(meta.gapTo) }), prev == null ? null : String(prev)),
     ]);
+    return res.at(-1).meta.changes > 0;
   }
   /** Alert history from the Python pipeline (kind "alerts"): authoritative for alerts that started in [since, dataEnd],
    *  which is how it heals posts the Worker missed. An all-clear seen by either side wins (it is a fact); of two

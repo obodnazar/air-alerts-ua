@@ -170,8 +170,14 @@ function eveningBlock(unit, r, cp, style) {
     `${bar(pa)} <i>зазвичай ${pct(r.usual)}</i>\n` +
     `Якщо буде, відбій до ${cpLabel(cp)}: ${pct(pc)} · увесь день дистанційно: ${pct(pr)}\n→ <b>${advice}</b>`;
 }
-function morningBlock(unit, r, cp, style) {
-  if (!r) return `<b>${esc(short(unit))}</b>\n🔕 Тривоги немає: очний день за розкладом.`;
+// live: liveState() for this unit at sending time, or null when the Worker's live data are stale (audit round 3:
+// the 08:00 table cannot see an alert that started at 08:04, so "no alert" needs the live check or a time stamp)
+function morningBlock(unit, r, cp, style, live) {
+  if (!r && live?.on) return `<b>${esc(short(unit))}</b>\n🚨 <b>Тривога зараз</b> (почалась після 08:00).\n` +
+    "→ <b>Пройдіть в укриття і стежте за офіційними сигналами.</b> Рішення про уроки ухвалює школа.";
+  if (!r && live) return `<b>${esc(short(unit))}</b>\n🔕 Тривоги немає: очний день за розкладом.`;
+  if (!r) return `<b>${esc(short(unit))}</b>\n🔕 О 08:00 тривоги не було: очний день за розкладом.\n` +
+    "<i>Якщо тривога почнеться, діють звичайні правила: укриття й офіційні сигнали.</i>";
   const p = r[`p_clear_${cp}`];
   const advice = p < STYLE[style][2] ? "Оголосіть дистанційний день зараз" : `Чекайте контрольної точки ${cpLabel(cp)}`;
   return `<b>${esc(short(unit))}</b>\n${LEVEL[r.level] || "Тривога"} триває ${pyRound(r.elapsed_min)} хв\n` +
@@ -188,10 +194,10 @@ export function eveningMessage(s, rows, day, banner = "") {
     "уроки (МОН, лист №1/19575). «Зазвичай» означає частку ранків з тривогою за останні 28 днів.</blockquote>";
   return [head, ...blocks, how, ...tail(s, banner)].join("\n\n");
 }
-export function morningMessage(s, rows, day, banner = "") {
-  const units = s.units.filter((u) => rows[u] || s.morning === "always");
+export function morningMessage(s, rows, day, banner = "", live = {}) {
+  const units = s.units.filter((u) => rows[u] || live[u]?.on || s.morning === "always");
   if (!units.length) return null;
-  const blocks = units.map((u) => morningBlock(u, rows[u], s.cp, s.style));
+  const blocks = units.map((u) => morningBlock(u, rows[u], s.cp, s.style, live[u]));
   return [`🌅 <b>${day.slice(8, 10)}.${day.slice(5, 7)} · 08:05</b>`, ...blocks, ...tail(s, banner)].join("\n\n");
 }
 
@@ -268,10 +274,13 @@ export function hourText(unit, d, hour, risk, live, seen, offsetMin) {
 /** blocks: {unit: {last: rows, todayCount, todayMs}} from Store.recent(). */
 export function recentText(units, blocks, meta, now, offsetMin) {
   const parts = ["📜 <b>Останні тривоги</b>"];
+  // "none today" is a claim; make it only when the history is complete and fresh (audit round 3)
+  const complete = !!meta.ok && now - meta.ok <= 15 * 60000 && !(meta.gapTo > 0);
   for (const u of units) {
     const b = blocks[u] || { last: [], todayCount: 0, todayMs: 0 };
+    const none = complete ? "Сьогодні тривог не було" : "Сьогодні: немає підтверджених даних";
     const lines = [`<b>${esc(short(u))}</b>`,
-      b.todayCount ? `Сьогодні: ${b.todayCount} ${alertsWord(b.todayCount)}, разом ${duration(b.todayMs)}` : "Сьогодні тривог не було"];
+      b.todayCount ? `Сьогодні: ${b.todayCount} ${alertsWord(b.todayCount)}, разом ${duration(b.todayMs)}${complete ? "" : " (може бути неповно)"}` : none];
     for (const r of b.last) {
       const s = kyivClock(r.started, offsetMin);
       const icon = LEVEL_ICON[r.max_level] || "🚨";
@@ -279,13 +288,13 @@ export function recentText(units, blocks, meta, now, offsetMin) {
         ? `${icon} ${s.dm} ${s.hm} → <b>триває</b> · ${duration(now - r.started)}`
         : `${icon} ${s.dm} ${s.hm}–${kyivClock(r.ended, offsetMin).hm} · ${duration(r.ended - r.started)}`);
     }
-    if (!b.last.length) lines.push("За останні два тижні тривог у записах немає.");
+    if (!b.last.length) lines.push(complete ? "За останні два тижні тривог у записах немає." : "Записів поки немає.");
     parts.push(lines.join("\n"));
   }
   const at = meta.ok ? kyivClock(meta.ok, offsetMin).hm : null;
   if (!meta.ok || now - meta.ok > 15 * 60000) parts.push(`⚠️ Дані давно не оновлювались${at ? ` (о ${at})` : ""}: список може бути неповним.`);
   else if (meta.gapTo > 0) parts.push("⚠️ Частину повідомлень каналу пропущено: список може бути неповним до найближчого оновлення.");
-  parts.push(`<i>Джерело: @UkraineAlarmSignal${at ? `, оновлено о ${at}` : ""}. Це факти, не прогноз. ` +
+  parts.push(`<i>Джерело: @UkraineAlarmSignal${at ? `, оновлено о ${at}` : ""}. ${complete ? "Це факти, не прогноз. " : ""}` +
     "🔴 червона, 🟡 жовта (за найвищим рівнем).</i>");
   return parts.join("\n\n");
 }
