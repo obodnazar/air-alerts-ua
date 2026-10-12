@@ -65,6 +65,8 @@ def main() -> None:
                 data_end=str(pd.Timestamp.now(tz="UTC")))
     req = urllib.request.Request(os.environ["INGEST_URL"], data=json.dumps(body, ensure_ascii=False).encode(),
                                  headers={"Content-Type": "application/json",
+                                          # Cloudflare rejects the default "Python-urllib" signature (error 1010)
+                                          "User-Agent": "shkilnyi-ranok-publisher/1.0",
                                           "Authorization": f"Bearer {os.environ['INGEST_SECRET']}"})
     with urllib.request.urlopen(req, timeout=60) as r:
         print(kind, day, "->", r.status, r.read().decode()[:200])
