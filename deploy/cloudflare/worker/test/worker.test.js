@@ -492,7 +492,7 @@ test("🕐 hour risk: one raion -> day -> hours after now, four to a row -> resu
   const { r, tg } = await hoursSetup();
   await r.handle(msg("/hours"));
   assert.match(tg.calls.at(-1)[2], /Ризик по годинах · Київ/);
-  assert.deepEqual(buttons(tg.calls.at(-1)[3]).map((b) => b.callback_data), [`hr:${K}:0`, `hr:${K}:1`]);
+  assert.deepEqual(buttons(tg.calls.at(-1)[3]).map((b) => b.callback_data), [`hr:${K}:0`, `hr:${K}:1`, "home"]);
   await r.handle(cb(`hr:${K}:0`));
   const hours = lastEdit(tg)[3].inline_keyboard;
   assert.equal(hours[0][0].text, "15:00");                              // 14:20 now: from 15:00
@@ -552,7 +552,7 @@ test("🕐 several raions: pick one first; late evening: today has no hours left
   const { r, tg, store } = await hoursSetup();
   await store.addUnit(1, "Бучанський район");
   await r.handle(cb("hr"));
-  assert.deepEqual(buttons(tg.calls.filter((c) => c[0] === "send").at(-1)[3]).map((b) => b.text), ["📍 Київ", "📍 Бучанський"]);
+  assert.deepEqual(buttons(lastEdit(tg)[3]).map((b) => b.text), ["📍 Київ", "📍 Бучанський", "← Назад"]);
   let t = Date.parse("2026-10-12T20:30:00Z");                           // 23:30 Kyiv
   r.now = () => new Date((t += 1000));
   await r.handle(cb(`hr:${K}:0`));
@@ -631,4 +631,33 @@ test("new keyboards fit a phone", () => {
       if (row.length > 2) assert.ok(row.length <= 4 && row.every((x) => x.text.length <= 5), row.map((x) => x.text));
     }
   }
+});
+
+test("every screen reached by a button has a way back; ← Назад leads to the menu; removing a raion asks first", async () => {
+  const { r, tg, store } = await hoursSetup();
+  const index = Object.fromEntries(catalog.units.map((u, i) => [u, i]));
+  const s = await store.get(1);
+  const backish = (k) => buttons(k).some((b) => /^← /.test(b.text));
+  const boards = { oblasts: ui.oblastKeyboard(Object.keys(catalog.oblasts)), raions: ui.raionKeyboard(catalog.oblasts["Київська область"], index),
+    search: ui.searchKeyboard(search("Буча"), index), how: ui.howKeyboard(), help: ui.helpKeyboard(), settings: ui.settingsKeyboard(s),
+    units: ui.unitsKeyboard(s.units, index, true), hoursUnit: ui.hoursUnitKeyboard(["Київ", "Бучанський район"], index),
+    hoursDay: ui.hoursDayKeyboard(1, false), hours: ui.hoursKeyboard(1, 1), result: ui.hourResultKeyboard(1, 0), recent: ui.recentKeyboard(),
+    remove: ui.removeConfirm("Київ", 1)[1], ...Object.fromEntries(Object.keys(ui.SCREENS).map((n) => [n, ui.screen(n, s)[1]])) };
+  for (const [name, k] of Object.entries(boards)) assert.ok(backish(k), `${name} has no way back`);
+  await r.handle(cb("home"));
+  assert.match(lastEdit(tg)[2], /Меню/);
+  assert.deepEqual(buttons(lastEdit(tg)[3]).map((b) => b.callback_data), ["now", "hr", "rc", "s:root", "add", "help"]);
+  const fresh = setup();
+  await fresh.r.handle(cb("home"));
+  assert.match(lastEdit(fresh.tg)[2], /Шкільний ранок/);                // no raion yet: the welcome screen
+  await r.handle(cb("add"));
+  assert.equal(buttons(lastEdit(tg)[3]).at(-1).callback_data, "s:units"); // adding from settings goes back to settings
+  await r.handle(cb(`rm:${K}`));
+  assert.match(lastEdit(tg)[2], /Прибрати <b>Київ<\/b>/);
+  assert.deepEqual((await store.get(1)).units, ["Київ"]);                 // nothing removed by one tap
+  await r.handle(cb(`rmy:${catalog.units.indexOf("Бучанський район")}`)); // not followed: refused
+  assert.deepEqual((await store.get(1)).units, ["Київ"]);
+  await r.handle(cb(`rmy:${K}`));
+  assert.deepEqual((await store.get(1)).units, []);
+  for (const d of ["home:1", "rmy:abc", "rm:99999"]) { await r.handle(cb(d)); assert.equal(tg.calls.at(-1)[0], "answer"); }
 });

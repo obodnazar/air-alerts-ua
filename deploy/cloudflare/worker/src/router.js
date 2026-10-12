@@ -30,9 +30,10 @@ export class Router {
     const parts = val === "" ? [] : val.split(":");
     if (parts.length > 3) return null;
     const many = sub.units.length > 1;
-    if (!parts.length) {
-      if (many) return this.tg.send(chat, "🕐 <b>Ризик по годинах</b>\nДля якого району?", ui.hoursUnitKeyboard(sub.units, this.index));
-      return this.tg.send(chat, ui.hoursAskText(sub.units[0]), ui.hoursDayKeyboard(this.index[sub.units[0]], false));
+    if (!parts.length) { // from /hours: a new message; from a button: this message, so "← Назад" leads back
+      const show = (text, k) => (mid ? this.tg.edit(chat, mid, text, k) : this.tg.send(chat, text, k));
+      if (many) return show("🕐 <b>Ризик по годинах</b>\nДля якого району?", ui.hoursUnitKeyboard(sub.units, this.index));
+      return show(ui.hoursAskText(sub.units[0]), ui.hoursDayKeyboard(this.index[sub.units[0]], false));
     }
     const unit = this.unitAt(parts[0]);
     if (!unit || !sub.units.includes(unit)) return "Цього району немає у ваших.";
@@ -60,7 +61,7 @@ export class Router {
     const now = this.now().getTime(), k = kyivNow(this.now());
     const [blocks, meta] = await Promise.all([this.store.recent(sub.units, kyivToUtc(k.day, 0), now), this.store.liveMeta()]);
     const text = ui.recentText(sub.units, blocks, meta, now, kyivOffset(now));
-    return edit ? this.tg.edit(chat, mid, text, ui.recentKeyboard()) : this.tg.send(chat, text, ui.recentKeyboard());
+    return edit && mid ? this.tg.edit(chat, mid, text, ui.recentKeyboard()) : this.tg.send(chat, text, ui.recentKeyboard());
   }
 
   async handle(update) {
@@ -114,12 +115,17 @@ export class Router {
       await this.tg.send(chat, ui.HOW, ui.howKeyboard());
     } else if (kind === "help") {
       await this.tg.send(chat, ui.HELP, ui.helpKeyboard());
+    } else if (kind === "home" && val === "") {
+      if (sub && sub.units.length) await this.tg.edit(chat, mid, ui.menuText(sub), ui.welcomeBackKeyboard(sub));
+      else await this.tg.edit(chat, mid, ui.WELCOME, ui.welcomeKeyboard());
     } else if (kind === "back" || kind === "add") {
-      await this.tg.edit(chat, mid, "Оберіть область:", ui.oblastKeyboard(this.oblasts));
+      await this.tg.edit(chat, mid, "Оберіть область:", ui.oblastKeyboard(this.oblasts, kind === "add" && sub ? "s:units" : "home"));
     } else if (kind === "u" && this.unitAt(val)) {
       if (await this.store.addUnit(chat, this.unitAt(val))) await this.tg.edit(chat, mid, ui.doneText(await this.store.get(chat)), ui.doneKeyboard());
       else return `Можна стежити щонайбільше за ${MAX_UNITS} районами. Приберіть один у /settings.`;
-    } else if (kind === "rm" && this.unitAt(val) && sub) {
+    } else if (kind === "rm" && sub && sub.units.includes(this.unitAt(val))) {
+      await this.tg.edit(chat, mid, ...ui.removeConfirm(this.unitAt(val), toInt(val)));  // a mis-tap must not delete
+    } else if (kind === "rmy" && sub && sub.units.includes(this.unitAt(val))) {
       await this.store.removeUnit(chat, this.unitAt(val));
       const s = await this.store.get(chat);
       await this.tg.edit(chat, mid, "🏫 <b>Мої райони</b> (до 3)", ui.unitsKeyboard(s.units, this.index, s.units.length < MAX_UNITS));
@@ -128,7 +134,7 @@ export class Router {
     } else if (kind === "hr") {
       return this.hours(chat, mid, sub, val).then((r) => (typeof r === "string" ? r : null));
     } else if (kind === "rc" && (val === "" || val === "1")) {
-      await this.recent(chat, mid, sub, val === "1");
+      await this.recent(chat, mid, sub, true);
     } else if (kind === "now" && sub) {
       await this.tg.send(chat, await this.nowForecast(sub));
     } else if (kind === "s" && !sub) {

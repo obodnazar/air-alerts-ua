@@ -42,7 +42,7 @@ export const HOW = "🔍 <b>Як читати прогноз</b>\n\n" +
   "• <b>Контрольна точка</b>: якщо відбій прийде до неї, діти йдуть на очні уроки (правило МОН). " +
   "Вашу школу можна обрати в налаштуваннях: 09:00–12:00.\n" +
   "• <b>Порада</b> залежить від стилю: 🛡 обережно, ⚖️ баланс, ⚡ сміливо.";
-export const howKeyboard = () => kb([[["📍 Обрати мій район", "back", "primary"]]]);
+export const howKeyboard = () => kb([[["📍 Обрати мій район", "back", "primary"]], back()]);
 
 export const HELP = "❓ <b>Допомога</b>\n\n" +
   "<b>Команди</b>\n" +
@@ -64,7 +64,12 @@ export const HELP = "❓ <b>Допомога</b>\n\n" +
   "Правило МОН (лист №1/19575): тривога о 08:00 означає дистанційний старт, відбій до контрольної точки означає очні уроки.\n" +
   "Код і методика: github.com/obodnazar/air-alerts-ua</blockquote>\n\n" +
   DISCLAIMER;
-export const helpKeyboard = () => kb([[["🔍 Як читати прогноз", "how"]], [["⚙️ Налаштування", "s:root"]]]);
+export const helpKeyboard = () => kb([[["🔍 Як читати прогноз", "how"]], [["⚙️ Налаштування", "s:root"]], back()]);
+
+/** "← Назад" on every screen reached by a button, so a mis-tap is one tap away from undone. */
+export const back = (data = "home", label = "← Назад") => [[label, data]];
+export const menuText = (s) => `🏠 <b>Меню</b>\nСтежу за: ${esc(s.units.map(short).join(", "))}.` +
+  (s.active ? "" : "\n\nВи відписані: щоб повернутися, оберіть район.");
 
 const btn = (text, data, style) => (style === "primary" || style === "success" ? { text, callback_data: data, style } : { text, callback_data: data });
 export const kb = (rows) => ({ inline_keyboard: rows.map((r) => r.map((b) => btn(...b))) });
@@ -80,13 +85,13 @@ function pairs(buttons, limit = 14) {
   return rows;
 }
 
-export const oblastKeyboard = (oblasts) => kb(pairs(oblasts.map((o, i) => [o.replace(" область", "").replace("м. ", ""), `ob:${i}`])));
+export const oblastKeyboard = (oblasts, to = "home") => kb([...pairs(oblasts.map((o, i) => [o.replace(" область", "").replace("м. ", ""), `ob:${i}`])), back(to)]);
 export const raionKeyboard = (units, index) => kb([...units.map((u) => [[short(u), `u:${index[u]}`]]), [["← Області", "back"]]]);
 
 export function searchKeyboard(hits, index) {
   const seen = new Set(), rows = [];
   for (const [, u] of hits) if (u && !seen.has(u)) { seen.add(u); rows.push([[`📍 ${short(u)}`, `u:${index[u]}`]]); }
-  return kb([...rows, [["Обрати зі списку", "back"]]]);
+  return kb([...rows, [["Обрати зі списку", "back"]], back()]);
 }
 
 export function searchText(hits) {
@@ -111,6 +116,7 @@ export function settingsKeyboard(s) {
     [[`🌅 Ранок · ${s.morning === "alert" ? "при тривозі" : "щоранку"}`, "s:m"]],
     [[`📰 Новини · ${s.banner ? "так" : "ні"}`, "s:bn"]],
     [["⏸ Пауза", "s:pause"]],
+    back(),
   ]);
 }
 
@@ -211,10 +217,10 @@ export function alertsWord(n) {
 }
 
 export function hoursUnitKeyboard(units, index) {
-  return kb([...units.map((u) => [[`📍 ${short(u)}`, `hr:${index[u]}`]])]);
+  return kb([...units.map((u) => [[`📍 ${short(u)}`, `hr:${index[u]}`]]), back()]);
 }
 export function hoursDayKeyboard(i, many) {
-  return kb([[["Сьогодні", `hr:${i}:0`], ["Завтра", `hr:${i}:1`]], ...(many ? [[["← Райони", "hr"]]] : [])]);
+  return kb([[["Сьогодні", `hr:${i}:0`], ["Завтра", `hr:${i}:1`]], many ? back("hr", "← Райони") : back()]);
 }
 /** Hour buttons, four to a row (phone width); today starts after the current hour. */
 export function hoursKeyboard(i, d, from = 0) {
@@ -228,7 +234,7 @@ export const hoursAskText = (unit) => `🕐 <b>Ризик по годинах ·
 export const hoursPickText = (unit, d) => `🕐 <b>${esc(short(unit))} · ${d === 1 ? "завтра" : "сьогодні"}</b>\nОберіть годину:`;
 export function hourResultKeyboard(i, d) {
   return kb([[["← Інша година", `hr:${i}:${d}`], [d === 1 ? "Сьогодні" : "Завтра", `hr:${i}:${1 - d}`]],
-    [["📜 Останні тривоги", "rc"]]]);
+    [["📜 Останні тривоги", "rc"]], back("home", "← Меню")]);
 }
 
 /** The hour screen. risk: hourly.hourRisk(); live: live.liveState() or null; seen: ms of the last good scrape. */
@@ -283,4 +289,6 @@ export function recentText(units, blocks, meta, now, offsetMin) {
     "🔴 червона, 🟡 жовта (за найвищим рівнем).</i>");
   return parts.join("\n\n");
 }
-export const recentKeyboard = () => kb([[["🔄 Оновити", "rc:1"]], [["🕐 Ризик по годинах", "hr"]]]);
+export const recentKeyboard = () => kb([[["🔄 Оновити", "rc:1"]], [["🕐 Ризик по годинах", "hr"]], back()]);
+export const removeConfirm = (u, i) => [`Прибрати <b>${esc(short(u))}</b> зі списку?`,
+  kb([[["✕ Так, прибрати", `rmy:${i}`]], back("s:units")])];
