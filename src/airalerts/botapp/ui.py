@@ -9,7 +9,11 @@ Design rules (docs/research/10-bot-ux.md, checked against core.telegram.org):
 
 from __future__ import annotations
 
-from html import escape
+from html import escape as _escape
+
+
+def escape(text: str) -> str:
+    return _escape(text, quote=False)  # apostrophes stay readable; < > & are still escaped
 
 DOW = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
 LEVEL = {"red": "🔴 червона тривога", "yellow": "🟡 жовта тривога"}
@@ -159,7 +163,12 @@ def bar(p: float, n: int = 10) -> str:
 def _evening_block(unit: str, row: dict, cp: int, style: str) -> str:
     p_alert, p_clear = row["p_alert_08"], row[f"p_clear_{cp}"]
     p_remote = p_alert * (1 - p_clear)
-    advice = "Розгляньте дистанційний ранок" if p_remote > STYLE[style][1] else "Плануйте очний день"
+    if p_remote > STYLE[style][1]:
+        advice = "Розгляньте дистанційний ранок"
+    elif p_alert >= 0.5:  # likely alert, but the all-clear will probably come in time: say both
+        advice = "Плануйте очний день, але можливий пізніший старт"
+    else:
+        advice = "Плануйте очний день"
     return (f"<b>{escape(short(unit))}</b>\n{mood(p_alert)} · тривога о 08:00: <b>{p_alert:.0%}</b>\n"
             f"{bar(p_alert)} <i>зазвичай {row['usual']:.0%}</i>\n"
             f"Якщо буде, відбій до {cp:02d}:00: {p_clear:.0%} · увесь день дистанційно: {p_remote:.0%}\n"
