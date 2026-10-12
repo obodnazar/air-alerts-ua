@@ -88,3 +88,12 @@ Everything below was designed **after** the test results were seen. It is report
      - at 07:00 it is below 1 SE, and worse on test.
      - The oblast and country shares already carry the spatial signal.
    - Kept the simpler model: 20:00, no neighbour features. Code: `experiments.py`; results: `results/posthoc_evening_neighbours.csv`.
+10. **Keyword event watcher on Lachen (@lachentyt, 8 570 posts) and Air Force posts, Dec 2025 – Oct 2026** (`events.py`, product unchanged).
+   - **Detection:** 64 mass-attack warnings from Lachen, 75 from the Air Force (mostly MiG-31K take-offs), 51 truce news items. Samples look right ("monitors: threat of a mass missile attack within 24 h"); rare false hits (a test launch).
+   - **H1a, warning 12:00–20:00 → mass night:**
+     - Kaggle mass report: 23% after a warning vs 15% without (lift 1.5); but only 17% of mass nights had one;
+     - night alert load > 40%: no lift (0.98).
+     - The two targets disagree: weak and unstable.
+   - **H1b, warning as a feature at 20:00:** no gain on validation (−1e-5); rejected by the registered rule.
+   - **H2, truce news clusters (n=7, from Dec 2025):** alert hours per unit fell in the 3 days after 6 of 7 clusters (mean −0.6 h/day). Too few events, and confounded by weekly patterns, so no causal claim.
+   - **Use in the product:** a banner in the brief ("situation changed"), not a model feature.

@@ -177,6 +177,7 @@ These were designed after seeing the test and the live morning, so they are repo
 | Occupied raions were a hand-made list | Share of each raion's area occupied on 31 Aug 2026, from the [DeepState map history](https://github.com/cyterat/deepstate-map-data) and [OPORA raion boundaries](https://github.com/OPORA/map_2020) ([geo.py](src/airalerts/geo.py)) | Selects exactly the hand-listed raions; a test keeps them in agreement |
 | Full reproduction needed ~1.5 h of Telegram scraping | Parsed alerts committed as a 0.5 MB snapshot; `scripts/reproduce.sh` | **1 min 27 s** from a fresh clone, identical numbers |
 | Would a later evening forecast (21:30, 22:00) or neighbouring raions help? | Tested on validation ([experiments.py](src/airalerts/experiments.py)) | No consistent gain: 22:00 better on August, worse on test; neighbours +0.1–0.4%. Kept the simpler model |
+| Can news predict alerts? Keyword watcher on Lachen (8 570 posts) + Air Force | [events.py](src/airalerts/events.py): mass-attack warnings, truce, retaliation threats | Warnings precede a mass night 1.5× more often but cover only 17% of them, and add nothing to the 20:00 model. After truce news, alerts fell in 6 of 7 cases (n too small to claim). News fits as a banner, not as a feature |
 | Did Air Force posts fail only because they were pooled? | Re-checked on new alerts only (no alert at 07:00) | Still no gain (Brier 0.05257 vs 0.05251). Alerts are declared from the same radar picture, so the posts add nothing new by 07:00 |
 
 ## Evening brief
