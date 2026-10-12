@@ -89,6 +89,14 @@ Every change after registration is listed there with its time and reason, includ
 
 ![skill](figures/test_skill.png)
 
+**What the percentages mean.**
+- **«Тривога о 08:00: 40%».** Of the mornings that get a forecast near 40%, about 4 in 10 should have an alert active at 08:00 in that raion. It is the chance of an alert at that moment, not the share of the raion's area or of the morning under alert. Alerts of both levels (yellow and red) count.
+- **«Відбій до 10:00: 70%».** If an alert is on at 08:00, it is the chance it ends by the school's control point. «Увесь день дистанційно» combines the two: P(alert at 08:00) × (1 − P(all-clear in time)).
+- **«Зазвичай 23%».** The share of the last 28 mornings with an alert at 08:00 in that raion. This is the climatology baseline the model must beat.
+- **Brier skill score**, the headline metric above: how much smaller the model's squared error on these probabilities is than the baseline's. +5% means 5% less error, and 0% means no better. It rewards honest probabilities: a forecast of 40% that comes true 4 times in 10 scores better than a confident 90% that comes true half the time.
+- **Risk words in the bot:** 🔕 low < 20%, 🔔 medium 20–49%, 🚨 high ≥ 50%. Bells, not colours, so they never mix with the real yellow and red alert levels.
+- **A forecast is not a warning.** Under any real alert, go to the shelter and follow official alerts.
+
 | Question | Model | vs strongest baseline | 95% CI | Criterion | Before the audit fixes |
 |---|---|---|---|---|---|
 | Alert at 08:00, issued **07:00** | logistic | **+7.8%** Brier skill (vs rolling Markov) | +2.7% … +13.3% | **met** | +6.7% [+1.3, +13.0], met |
