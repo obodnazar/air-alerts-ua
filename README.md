@@ -166,20 +166,39 @@ The forecast for this morning was committed **at 00:40, before 08:00** ([brief](
 
 One morning is a noisy sample: it agrees with the test results but proves nothing by itself.
 
+## After the registered test: fixes, each still checked out of sample
+
+These were designed after seeing the test and the live morning, so they are reported apart from the registered results. Each forecast still uses only days before the forecast day. They are logged in [PREREG.md](PREREG.md), items 6–8.
+
+| Problem found | Fix | Check |
+|---|---|---|
+| The brief gave every raion of an oblast the same all-clear chance (all five Kharkiv raions got 61% on 12 Oct; none cleared) | All-clear **per raion**, refitted every day on the last 42 days. A raion with few alerts borrows from its oblast ([clearance.py](src/airalerts/clearance.py)) | Rolling, weekdays 15 Sep – 12 Oct, 520 alerts at 08:00. Evening version: **+6.6%** Brier skill vs the per-oblast curve [+1.8, +11.4] |
+| The registered all-clear model was trained before the yellow/red reform and failed on test | The 08:00 version uses the **level in force at 08:00** and the time already elapsed, on post-reform data | **+27.6%** [+20.4, +32.5]. It now gives the brief's 08:00 update per raion: "wait for the control point" or "call the remote day now" |
+| Occupied raions were a hand-made list | Share of each raion's area occupied on 31 Aug 2026, from the [DeepState map history](https://github.com/cyterat/deepstate-map-data) and [OPORA raion boundaries](https://github.com/OPORA/map_2020) ([geo.py](src/airalerts/geo.py)) | Selects exactly the hand-listed raions; a test keeps them in agreement |
+| Full reproduction needed ~1.5 h of Telegram scraping | Parsed alerts committed as a 0.5 MB snapshot; `scripts/reproduce.sh` | **1 min 27 s** from a fresh clone, identical numbers |
+| Did Air Force posts fail only because they were pooled? | Re-checked on new alerts only (no alert at 07:00) | Still no gain (Brier 0.05257 vs 0.05251). Alerts are declared from the same radar picture, so the posts add nothing new by 07:00 |
+
 ## Evening brief
 
-`python -m airalerts.brief --day 2026-10-13` writes one line per raion: the chance of an alert at 08:00, the chance of an all-clear by 10:00, the chance of a fully remote day, and plain advice. It also includes the colour × elapsed-time table for the 08:00 update. The text comes from a template, with no LLM: every number in it comes straight from the models.
+`python -m airalerts.brief --day 2026-10-13` writes one line per raion: the chance of an alert at 08:00, the chance of an all-clear by 10:00 (per raion), the chance of a fully remote day, and plain advice. `--issue 08:00` gives the morning update: for each raion under alert, the chance of an all-clear by 10:00 given the alert's colour and how long it has run, with "wait" or "call the remote day now". The text comes from a template, with no LLM: every number in it comes straight from the models.
 
 ## Limitations
 
-- **One evaluation window of 29 weekdays in an unusually intense period.** The intervals above reflect that.
-- **The all-clear model was trained before the yellow/red reform.** Only ~5 weeks of post-reform data exist.
-- **The source switch on 28 Aug** means training and test labels come from different, though 96–97% consistent, feeds.
-- **Edited posts.** Historical Telegram posts carry no "edited" flag (a scraper bug, fixed). A sample shows 2.8% of Air Force threat posts were edited, and those features were not used in the end.
-- **Excluded units.** Occupied raions are listed by hand, and Donetsk oblast is excluded.
-- **Scope.** Not a replacement for official alerts. Uses no real-time threat positions.
+- **One test window of 29 weekdays, in an unusually intense period.** The intervals above reflect that.
+- **Under 6 weeks of post-reform data.** The rolling all-clear model refits daily as more accumulates.
+- **Different sources for training and test labels.** Training labels come from the official feed and test labels from Telegram (switch on 28 Aug). They agree on 96–97% of alert starts.
+- **No "edited" flag on historical Telegram posts** (scraper bug, fixed). About 2.8% of Air Force threat posts were edited, and those features are not used.
+- **Not a replacement for official alerts.** No real-time threat positions are used.
 
 ## Run
+
+Everything, from a fresh clone, in about 1.5 minutes, using the committed snapshot of parsed alerts:
+
+```bash
+./scripts/reproduce.sh
+```
+
+From scratch, re-scraping Telegram (~1.5 h):
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -204,7 +223,8 @@ export PYTHONPATH=src
 | `src/airalerts/data.py` | one alert store per raion, source switch, exclusions |
 | `src/airalerts/dataset.py`, `attacks.py`, `airforce.py` | as-of-time features |
 | `src/airalerts/models.py`, `policies.py`, `evaluate.py` | models, MoE decision rule, registered evaluation |
-| `src/airalerts/levels.py`, `cost.py` | all-clear by colour; price of alerts for schools |
+| `src/airalerts/levels.py`, `cost.py`, `clearance.py`, `geo.py` | all-clear by colour; price of alerts for schools; per-raion all-clear; occupied raions from the map |
+| `data/snapshot/` | parsed alerts (15 Aug – 12 Oct) and occupied shares, for fast reproduction |
 | `src/airalerts/brief.py`, `live.py` | evening brief; live forecast and check |
 | `PREREG.md` | the registered evaluation and every later change |
 | `docs/` | research, the five problems considered, architecture, plain-language explanation |
