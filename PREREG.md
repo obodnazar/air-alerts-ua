@@ -65,3 +65,14 @@ Raions with at least one raion-level alert of their own between 15 Dec 2025 and 
 3. **12 Oct, ~00:55, before the test run: source switch moved from 1 Sep to 28 Aug.** Comparing the two alert sources day by day showed an outage in the official feed: 0 alerts on 30 Aug - 1 Sep (the volunteer feed has ~170 a day), half of them missing on 2 Sep. On days when the official feed works (3-5 Sep), 97-100% of its alerts match a Telegram alert within 2 minutes and vice versa. No other gap in Dec 2025 - Aug 2026 (daily official/volunteer ratio checked). Validation days 28-31 Aug now come from Telegram.
 4. **12 Oct, ~01:55, before the test run: known limitation of the Air Force features.** The scraper's "edited" detector looked for the wrong HTML string, so historical posts carry no edit flag (fixed for future scrapes). A random sample of 60 pages (1 200 posts) shows 2.8% of threat posts were edited; examples look like wording fixes. An edit that added an oblast after publication would leak; the exposure is bounded by that 2.8% and the 1-SE rule decides whether these features are used at all.
 5. **12 Oct, 01:50: the test run crashed after M1** (train and validation tables concatenated with duplicate row labels; the survival library refused them). Fixed with `ignore_index=True`, no other change. The run was repeated; M1 test numbers are identical in both runs (the pipeline is deterministic), so the repeat did not allow any choice based on test results. M2 and policy results come from the repeated run.
+
+## Post-hoc work after the registered test (12 Oct, from ~10:40)
+
+Everything below was designed **after** the test results were seen. It is reported separately and never mixed into the registered results. Each item is still evaluated out of sample: every forecast uses a model fitted only on days before the forecast day.
+
+6. **All-clear per raion, refitted daily on the last 42 days** (`clearance.py`).
+   - **Motivation:** the registered M2 was trained before the yellow/red reform and failed its criterion on test; the brief used one curve per oblast, and on 12 Oct all five Kharkiv raions got 61% while none cleared.
+   - **Rolling evaluation** on weekdays 15 Sep – 12 Oct (520 alerts at 08:00), against the per-oblast Kaplan–Meier curve used before:
+     - evening version: BSS +0.066 [+0.018, +0.114];
+     - 08:00 version (level + elapsed): BSS +0.276 [+0.204, +0.325].
+   - Both now feed the brief.
