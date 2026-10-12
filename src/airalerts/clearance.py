@@ -62,8 +62,9 @@ def _features(df: pd.DataFrame, rates, with_08: bool) -> pd.DataFrame:
     return X
 
 
-def fit_predict(hist: pd.DataFrame, target: pd.DataFrame, with_08: bool) -> np.ndarray:
-    hist = hist[hist.event | (hist.remaining > 120)]  # outcome known
+def fit_predict(hist: pd.DataFrame, target: pd.DataFrame, with_08: bool, horizon: float = 120) -> np.ndarray:
+    """P(all-clear within `horizon` minutes after 08:00); 120 = control point 10:00."""
+    hist = hist[hist.event | (hist.remaining > horizon)].assign(clear_by_10=lambda x: x.remaining <= horizon)
     rates = _rates(hist)
     # rates are computed on the same window they are fitted on; to avoid the model trusting
     # in-sample rates too much, the raion/oblast columns for fitting come from a leave-one-day-out pass

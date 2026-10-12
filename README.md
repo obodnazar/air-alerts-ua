@@ -184,14 +184,32 @@ These were designed after seeing the test and the live morning, so they are repo
 
 `python -m airalerts.brief --day 2026-10-13` writes one line per raion: the chance of an alert at 08:00, the chance of an all-clear by 10:00 (per raion), the chance of a fully remote day, and plain advice. `--issue 08:00` gives the morning update: for each raion under alert, the chance of an all-clear by 10:00 given the alert's colour and how long it has run, with "wait" or "call the remote day now". The text comes from a template, with no LLM: every number in it comes straight from the models.
 
-## Telegram bot
+## Telegram bot «Шкільний ранок»
 
-[bot.py](src/airalerts/bot.py) sends the same template brief for one raion, in plain Python over the Telegram Bot API, with no LLM:
-- `/raion Бучанський` subscribes to a raion;
-- `/now` returns tomorrow's forecast;
-- `send --issue 20:00` and `send --issue 08:00` push the evening brief and the morning update to subscribers. Schedule them with cron or GitHub Actions.
+Architecture and design notes: [docs/bot-architecture.md](docs/bot-architecture.md). Code: `src/airalerts/botapp/`. Plain Python over the Telegram Bot API, with no extra libraries and no LLM.
 
-The token comes from @BotFather and is read from the `TELEGRAM_BOT_TOKEN` environment variable; it is never stored in the repo. `--dry-run` prints the messages instead of sending them.
+**What a user does:**
+- picks an oblast and then a raion with buttons, or types a town ("Біла Церква" → Білоцерківський район, via 1 419 hromadas placed inside raion boundaries);
+- picks the school's control point (09–12) and whether to get morning messages always or only when there is an alert.
+
+**What the bot sends:**
+- **20:00** on school-day evenings: the chance of an alert at 08:00, the chance of an all-clear by *their* control point, and advice;
+- **08:05** if an alert is on: its colour, how long it has run, the chance of an all-clear in time, and "wait" or "call the remote day now";
+- a **news banner** when a truce, a mass-attack warning or retaliation threats appear in the news: "not confirmed" if only Lachen reports it, "confirmed" if an official channel (President, Air Force) does too. The banner informs and does not change the numbers.
+
+**How it is built to survive in production:**
+- forecasts for all 104 raions are computed once and cached (~30 s);
+- one message per user per day, logged in SQLite, so a restart sends no duplicates;
+- it waits on HTTP 429 and switches off users who blocked the bot (403);
+- it stays well below the ~30 messages/s limit;
+- it catches up if started late, and a failed job retries at most every 10 minutes.
+
+**Checked:** 18 offline tests with a fake Telegram (every raion reachable by buttons, town search, settings, idempotent broadcast, schedule incl. weekends, 429 retry, banner confirmation). A real-data dry run produced the evening and morning messages for three subscribers with the live banner.
+
+```bash
+export TELEGRAM_BOT_TOKEN=...          # from @BotFather; never committed
+PYTHONPATH=src .venv/bin/python -m airalerts.botapp.main
+```
 
 ## Limitations
 

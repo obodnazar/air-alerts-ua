@@ -25,3 +25,4 @@ venv/
 !results/**
 !data/snapshot/
 !data/snapshot/*.parquet
+!data/snapshot/*.json
