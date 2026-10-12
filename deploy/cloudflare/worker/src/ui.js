@@ -27,6 +27,8 @@ export const welcomeBack = (s) => `👋 <b>З поверненням!</b>\nСт�
   (s.active ? "" : "\n\nВи були відписані: оберіть район, щоб повернутися.");
 export const welcomeBackKeyboard = (s) => kb([
   [["🌙 Прогноз зараз", "now", "primary"]],
+  [["🕐 Ризик по годинах", "hr"]],
+  [["📜 Останні тривоги", "rc"]],
   [["⚙️ Налаштування", "s:root"], ["＋ Район", "add"]],
   [["❓ Допомога", "help"]],
 ].filter((row, i) => s.active || i !== 0));
@@ -45,6 +47,8 @@ export const howKeyboard = () => kb([[["📍 Обрати мій район", "b
 export const HELP = "❓ <b>Допомога</b>\n\n" +
   "<b>Команди</b>\n" +
   "🌙 /now · прогноз на найближчий шкільний день\n" +
+  "🕐 /hours · ризик тривоги на обрану годину сьогодні чи завтра\n" +
+  "📜 /recent · останні тривоги у ваших районах\n" +
   "⚙️ /settings · райони, контрольна точка, час прогнозу, стиль порад\n" +
   "📍 /start · обрати або додати район (до 3)\n" +
   "⏸ /pause · пауза на канікули чи хворобу\n" +
@@ -94,7 +98,8 @@ export const doneText = (s) => `✅ <b>Готово!</b> Стежу за: ${esc(
   `🌙 Прогноз щовечора (нд–чт) близько <b>${s.evening === "20:00" ? "20:05" : s.evening}</b>\n` +
   `🔔 Контрольна точка школи: <b>${String(s.cp).padStart(2, "0")}:00</b>\n\n` +
   `<i>Змінити це можна в налаштуваннях.</i>`;
-export const doneKeyboard = () => kb([[["🌙 Прогноз зараз", "now", "primary"]], [["⚙️ Налаштувати", "s:root"]]]);
+export const doneKeyboard = () => kb([[["🌙 Прогноз зараз", "now", "primary"]], [["🕐 Ризик по годинах", "hr"]],
+  [["📜 Останні тривоги", "rc"]], [["⚙️ Налаштувати", "s:root"]]]);
 
 export const settingsText = (s) => `⚙️ <b>Налаштування</b>${s.paused_until ? `\n⏸ Пауза до ${s.paused_until}` : ""}`;
 export function settingsKeyboard(s) {
@@ -183,3 +188,99 @@ export function morningMessage(s, rows, day, banner = "") {
   const blocks = units.map((u) => morningBlock(u, rows[u], s.cp, s.style));
   return [`🌅 <b>${day.slice(8, 10)}.${day.slice(5, 7)} · 08:05</b>`, ...blocks, ...tail(s, banner)].join("\n\n");
 }
+
+// ---------- 🕐 risk by hour, 📜 recent alerts ----------
+const LEVEL_ICON = { red: "🔴", yellow: "🟡" };
+const LEVEL_WORD = { red: "червона", yellow: "жовта" };
+export const PLANNING = "<i>Це ймовірність для планування, а не сигнал безпеки. Коли лунає тривога, йдіть в укриття.</i>";
+const hh = (h) => `${String(h).padStart(2, "0")}:00`;
+/** Kyiv clock for a UTC ms; offset from hourly.js (no Intl in hot paths). */
+export function kyivClock(ms, offsetMin) {
+  const d = new Date(ms + offsetMin * 60000);
+  return { hm: `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`,
+    dm: `${String(d.getUTCDate()).padStart(2, "0")}.${String(d.getUTCMonth() + 1).padStart(2, "0")}` };
+}
+export function duration(ms) {
+  const m = Math.max(0, Math.round(ms / 60000));
+  return m < 60 ? `${m} хв` : `${Math.floor(m / 60)} год${m % 60 ? ` ${m % 60} хв` : ""}`;
+}
+/** 1 тривога, 2 тривоги, 5 тривог, 11 тривог, 21 тривога */
+export function alertsWord(n) {
+  const a = n % 10, b = n % 100;
+  return a === 1 && b !== 11 ? "тривога" : a >= 2 && a <= 4 && (b < 12 || b > 14) ? "тривоги" : "тривог";
+}
+
+export function hoursUnitKeyboard(units, index) {
+  return kb([...units.map((u) => [[`📍 ${short(u)}`, `hr:${index[u]}`]])]);
+}
+export function hoursDayKeyboard(i, many) {
+  return kb([[["Сьогодні", `hr:${i}:0`], ["Завтра", `hr:${i}:1`]], ...(many ? [[["← Райони", "hr"]]] : [])]);
+}
+/** Hour buttons, four to a row (phone width); today starts after the current hour. */
+export function hoursKeyboard(i, d, from = 0) {
+  const btns = [];
+  for (let h = from; h < 24; h++) btns.push([hh(h), `hr:${i}:${d}:${h}`]);
+  const rows = [];
+  for (let k = 0; k < btns.length; k += 4) rows.push(btns.slice(k, k + 4));
+  return kb([...rows, [["← День", `hr:${i}`]]]);
+}
+export const hoursAskText = (unit) => `🕐 <b>Ризик по годинах · ${esc(short(unit))}</b>\nОберіть день:`;
+export const hoursPickText = (unit, d) => `🕐 <b>${esc(short(unit))} · ${d === 1 ? "завтра" : "сьогодні"}</b>\nОберіть годину:`;
+export function hourResultKeyboard(i, d) {
+  return kb([[["← Інша година", `hr:${i}:${d}`], [d === 1 ? "Сьогодні" : "Завтра", `hr:${i}:${1 - d}`]],
+    [["📜 Останні тривоги", "rc"]]]);
+}
+
+/** The hour screen. risk: hourly.hourRisk(); live: live.liveState() or null; seen: ms of the last good scrape. */
+export function hourText(unit, d, hour, risk, live, seen, offsetMin) {
+  const head = `🕐 <b>${esc(short(unit))} · ${d === 1 ? "завтра" : "сьогодні"}, ${hh(hour)}</b>`;
+  const at = seen ? kyivClock(seen, offsetMin).hm : null;
+  const parts = [head];
+  if (!live) {
+    parts.push(`⚠️ Немає свіжих даних про тривоги зараз${at ? ` (останнє оновлення о ${at})` : ""}. ` +
+      "Стежте за офіційними сповіщеннями.");
+  } else if (live.on) {
+    const lv = LEVEL_WORD[live.level];
+    parts.push(`🚨 <b>Зараз у районі тривога</b>${lv ? ` (${lv})` : ""}, триває ${duration(live.elapsed * 60000)}` +
+      `${live.stuck ? " (довше за добу: можливо, ми пропустили відбій)" : ""}.\n` +
+      "<b>Будьте в укритті й слухайте офіційні сповіщення.</b> Не плануйте виходити до відбою.");
+  } else parts.push(`Зараз: тривоги немає (дані на ${at}).`);
+  if (!risk) {
+    parts.push("Для цього району ще немає даних по годинах.");
+  } else if (risk.model != null) {
+    parts.push(`Ймовірність, що о ${hh(hour)} буде тривога: <b>${pct(risk.model)}</b>\n${bar(risk.model)} ` +
+      `<i>зазвичай о ${hh(hour)}: ${pct(risk.clim)}</i>`);
+  } else {
+    parts.push(`📊 <b>Історично</b> о ${hh(hour)} тривога була у <b>${pct(risk.clim)}</b> днів (за останні 28 днів).\n` +
+      (live ? "<i>Це не прогноз: на такий проміжок наша модель не точніша за історію.</i>"
+        : "<i>Без свіжих даних про «зараз» прогноз не рахую, це лише історія.</i>"));
+  }
+  parts.push(PLANNING);
+  return parts.join("\n\n");
+}
+
+/** blocks: {unit: {last: rows, todayCount, todayMs}} from Store.recent(). */
+export function recentText(units, blocks, meta, now, offsetMin) {
+  const parts = ["📜 <b>Останні тривоги</b>"];
+  for (const u of units) {
+    const b = blocks[u] || { last: [], todayCount: 0, todayMs: 0 };
+    const lines = [`<b>${esc(short(u))}</b>`,
+      b.todayCount ? `Сьогодні: ${b.todayCount} ${alertsWord(b.todayCount)}, разом ${duration(b.todayMs)}` : "Сьогодні тривог не було"];
+    for (const r of b.last) {
+      const s = kyivClock(r.started, offsetMin);
+      const icon = LEVEL_ICON[r.max_level] || "🚨";
+      lines.push(r.ended == null
+        ? `${icon} ${s.dm} ${s.hm} → <b>триває</b> · ${duration(now - r.started)}`
+        : `${icon} ${s.dm} ${s.hm}–${kyivClock(r.ended, offsetMin).hm} · ${duration(r.ended - r.started)}`);
+    }
+    if (!b.last.length) lines.push("За останні два тижні тривог у записах немає.");
+    parts.push(lines.join("\n"));
+  }
+  const at = meta.ok ? kyivClock(meta.ok, offsetMin).hm : null;
+  if (!meta.ok || now - meta.ok > 15 * 60000) parts.push(`⚠️ Дані давно не оновлювались${at ? ` (о ${at})` : ""}: список може бути неповним.`);
+  else if (meta.gapTo > 0) parts.push("⚠️ Частину повідомлень каналу пропущено: список може бути неповним до найближчого оновлення.");
+  parts.push(`<i>Джерело: @UkraineAlarmSignal${at ? `, оновлено о ${at}` : ""}. Це факти, не прогноз. ` +
+    "🔴 червона, 🟡 жовта (за найвищим рівнем).</i>");
+  return parts.join("\n\n");
+}
+export const recentKeyboard = () => kb([[["🔄 Оновити", "rc:1"]], [["🕐 Ризик по годинах", "hr"]]]);

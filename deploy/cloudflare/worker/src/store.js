@@ -84,6 +84,84 @@ export class Store {
     const r = await this.q("SELECT body FROM forecasts WHERE kind=? AND day=?", kind, day).first();
     return r ? JSON.parse(r.body) : null;
   }
+  async saveHourly(day, body) {
+    await this.db.batch([
+      this.q("INSERT INTO forecasts VALUES ('hourly', ?1, ?2, ?3) ON CONFLICT(kind, day) DO UPDATE SET body=excluded.body, received=excluded.received",
+        day, JSON.stringify(body), new Date().toISOString()),
+      this.q("DELETE FROM forecasts WHERE kind='hourly' AND day < ?", day),
+    ]);
+  }
+  async hourlyParams() {
+    const r = await this.q("SELECT body FROM forecasts WHERE kind='hourly' ORDER BY day DESC LIMIT 1").first();
+    return r ? JSON.parse(r.body) : null;
+  }
+
+  // ---------- live alerts (schema.sql: alerts); every call is one or two statements ----------
+  /** {last: newest post id processed, ok: ms of the last good scrape, gapTo: posts up to this id may be missing (0 = none)} */
+  async liveMeta() {
+    const rows = (await this.q("SELECT key, value FROM state WHERE key IN ('live_last_id', 'live_ok', 'live_gap_to')").all()).results;
+    const kv = Object.fromEntries(rows.map((r) => [r.key, Number(r.value) || 0]));
+    return { last: kv.live_last_id || 0, ok: kv.live_ok || 0, gapTo: kv.live_gap_to || 0 };
+  }
+  async openAlerts(units = null) {
+    const sql = "SELECT * FROM alerts WHERE ended IS NULL" + (units ? " AND unit IN (SELECT value FROM json_each(?))" : "") + " ORDER BY started";
+    return (await (units ? this.q(sql, JSON.stringify(units)) : this.q(sql)).all()).results;
+  }
+  /** Write what a scrape changed and its bookkeeping, in one batch (two statements). */
+  async saveLive(rows, meta) {
+    await this.db.batch([
+      ...(rows.length ? [this.q(`INSERT INTO alerts (unit, started, ended, level, max_level)
+        SELECT json_extract(value, '$.unit'), json_extract(value, '$.started'), json_extract(value, '$.ended'),
+          json_extract(value, '$.level'), json_extract(value, '$.max_level') FROM json_each(?) WHERE true
+        ON CONFLICT(unit, started) DO UPDATE SET ended=coalesce(excluded.ended, alerts.ended), level=excluded.level,
+          max_level=excluded.max_level`, JSON.stringify(rows))] : []),
+      this.q(`INSERT INTO state (key, value) SELECT key, value FROM json_each(?) WHERE true
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+      JSON.stringify({ live_last_id: String(meta.last), live_ok: String(meta.ok), live_gap_to: String(meta.gapTo) })),
+    ]);
+  }
+  /** Alert history from the Python pipeline (kind "alerts"): authoritative for alerts that started in [since, dataEnd],
+   *  which is how it heals posts the Worker missed. An all-clear seen by either side wins (it is a fact); of two
+   *  open rows of one raion only the earliest is kept (a later "start" was a level change seen without its start). */
+  async applySeed(seed, now = Date.now()) {
+    const meta = await this.liveMeta();
+    const newer = seed.max_post_id >= meta.last ? 1 : 0;
+    const rows = JSON.stringify(seed.alerts);
+    const rank = (x) => `CASE ${x} WHEN 'red' THEN 2 WHEN 'yellow' THEN 1 ELSE 0 END`;
+    await this.db.batch([
+      this.q(`DELETE FROM alerts WHERE started >= ?1 AND started <= ?2 AND NOT EXISTS (SELECT 1 FROM json_each(?3) j
+        WHERE json_extract(j.value, '$[0]') = alerts.unit AND json_extract(j.value, '$[1]') = alerts.started)`, seed.since, seed.data_end, rows),
+      this.q(`INSERT INTO alerts (unit, started, ended, level, max_level)
+        SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]'), json_extract(value, '$[3]'),
+          json_extract(value, '$[4]') FROM json_each(?1) WHERE true
+        ON CONFLICT(unit, started) DO UPDATE SET ended=coalesce(alerts.ended, excluded.ended),
+          level=CASE WHEN ?2 = 1 AND alerts.ended IS NULL THEN excluded.level ELSE alerts.level END,
+          max_level=CASE WHEN ${rank("excluded.max_level")} > ${rank("alerts.max_level")} THEN excluded.max_level ELSE alerts.max_level END`,
+      rows, newer),
+      this.q(`DELETE FROM alerts WHERE ended IS NULL AND EXISTS (SELECT 1 FROM alerts b WHERE b.unit = alerts.unit
+        AND b.ended IS NULL AND b.started < alerts.started)`),
+      this.q("DELETE FROM alerts WHERE started < ?", now - 14 * 86400000),
+      this.q(`INSERT INTO state (key, value) SELECT key, value FROM json_each(?) WHERE true
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value`, JSON.stringify({
+        live_last_id: String(Math.max(meta.last, seed.max_post_id)),
+        live_gap_to: String(meta.gapTo && seed.max_post_id >= meta.gapTo ? 0 : meta.gapTo) })),
+    ]);
+    return { rows: seed.alerts.length, newer: !!newer };
+  }
+  /** The last n alerts of each unit, and today's count and minutes under alert (since dayStart, Kyiv midnight). */
+  async recent(units, dayStart, now, n = 5) {
+    const u = JSON.stringify(units);
+    const [last, today] = await Promise.all([
+      this.q(`SELECT * FROM (SELECT *, row_number() OVER (PARTITION BY unit ORDER BY started DESC) AS rn FROM alerts
+        WHERE unit IN (SELECT value FROM json_each(?1))) WHERE rn <= ?2 ORDER BY unit, started DESC`, u, n).all(),
+      this.q(`SELECT unit, count(*) AS n, sum(min(coalesce(ended, ?3), ?3) - max(started, ?2)) AS ms FROM alerts
+        WHERE unit IN (SELECT value FROM json_each(?1)) AND coalesce(ended, ?3) > ?2 AND started <= ?3 GROUP BY unit`, u, dayStart, now).all(),
+    ]);
+    const t = Object.fromEntries(today.results.map((r) => [r.unit, r]));
+    return Object.fromEntries(units.map((x) => [x, { last: last.results.filter((r) => r.unit === x),
+      todayCount: t[x]?.n || 0, todayMs: t[x]?.ms || 0 }]));
+  }
+
   /** Per-chat and global limits, checked and recorded in one statement (atomic in D1, unlike count-then-insert). */
   async allowed(chat, now = Date.now(), max = 8, windowMs = 10000, globalMax = 25, globalMs = 1000) {
     const [, ins] = await this.db.batch([

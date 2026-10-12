@@ -6,8 +6,11 @@ Decides by Kyiv local time what to publish (DST-safe, so the workflow can fire a
   20:00–21:30 -> evening forecast for the next school day;  08:00–09:30 -> the 08:00 update for today.
   19:30–20:00 and 07:30–08:00: the runner starts early (GitHub cron runs late by 5–20 min), waits for the issue time,
   then refreshes: the forecast still uses data up to 20:00 / 08:00 only, and lands ~2 min after it.
-Anything else, or a weekend target day, exits without work. In summer both UTC crons pass the window (20:05 and
-21:05); the Worker keeps the first forecast of a day (409 for the second), so every subscriber gets the same numbers.
+Anything else exits without work. In summer both UTC crons pass the window (20:05 and 21:05); the Worker keeps the
+first forecast of a day (409 for the second), so every subscriber gets the same numbers.
+Every run in a window, weekends included, also sends the hourly-risk parameters (kind "hourly", hourly.payload) and the
+last 7 days of alerts per raion (kind "alerts"), which heal the Worker's own live scrape. Those two are best effort:
+a failure is printed and never blocks the school forecast.
 
     --force evening 2026-10-13   publish now, whatever the time, and replace a forecast already in the Worker
 """
@@ -59,6 +62,12 @@ def what_now(now: pd.Timestamp) -> tuple[str, str] | None:
     return (kind, day.isoformat()) if day.weekday() < 5 else None
 
 
+def in_window(now: pd.Timestamp) -> bool:
+    """Inside a publishing window, whatever the weekday (the hourly parameters are needed on weekends too)."""
+    hhmm = now.strftime("%H:%M")
+    return "20:00" <= hhmm <= "21:30" or "08:00" <= hhmm <= "09:30"
+
+
 def forced(kind: str, day: str) -> tuple[str, str]:
     """Validate a manual --force; the workflow passes it through, so it is checked here, not trusted."""
     if kind not in ("evening", "morning"):
@@ -93,6 +102,50 @@ def newest_post() -> str | None:
     return newest
 
 
+def newest_post_id() -> int | None:
+    ids = [json.loads(l)["id"] for f in (MAIN, MAIN.with_name("UkraineAlarmSignal_live.jsonl")) if f.exists()
+           for l in f.open(encoding="utf-8") if l.strip()]
+    return max(ids) if ids else None
+
+
+def alert_history(units: set[str], data_end: str, max_id: int, days: int = 7) -> dict:
+    """Alerts per raion that started in the last `days` before the newest post, as the Worker stores them:
+    [unit, started ms, ended ms or None if still on, level now, highest level]."""
+    eps = pd.read_parquet(Path("data/interim/telegram_episodes.parquet"))
+    end = pd.Timestamp(data_end)
+    since = end - pd.Timedelta(days, "D")
+    e = eps[eps.unit.isin(units) & eps.unit_type.isin(["raion", "kyiv"]) & (eps.started_at >= since)]
+    ms = lambda t: int(pd.Timestamp(t).value // 1_000_000)  # noqa: E731
+    rows = [[r.unit, ms(r.started_at), None if r.censored else min(ms(r.finished_at), ms(end)),
+             json.loads(r.levels)[-1][1] if r.levels else None, r.max_level] for r in e.itertuples()]
+    return dict(kind="alerts", max_post_id=int(max_id), data_end=ms(end), since=ms(since), alerts=rows)
+
+
+def extras(now: pd.Timestamp) -> list[dict]:
+    """The two best-effort bodies: hourly parameters as of 00:00 Kyiv today, and the alert history."""
+    from .. import hourly
+    from ..data import build_store, eligible_units
+
+    store = build_store(Path("data/raw/vadimkin/official_data_uk.csv"), Path("data/interim/telegram_episodes.parquet"))
+    served = set(json.loads(Path("data/snapshot/bot_catalog.json").read_text(encoding="utf-8"))["units"])
+    units = [u for u in eligible_units(store) if u in served]
+    body = dict(kind="hourly", **hourly.payload(store, units, now.normalize().tz_localize(None)))
+    return [body, alert_history(set(units), newest_post(), newest_post_id())]
+
+
+def post(body: dict) -> tuple[int, str]:
+    req = urllib.request.Request(os.environ["INGEST_URL"], data=json.dumps(body, ensure_ascii=False).encode(),
+                                 headers={"Content-Type": "application/json",
+                                          # Cloudflare rejects the default "Python-urllib" signature (error 1010)
+                                          "User-Agent": "shkilnyi-ranok-publisher/1.0",
+                                          "Authorization": f"Bearer {os.environ['INGEST_SECRET']}"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, r.read().decode()[:200]
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()[:200]
+
+
 def main() -> None:
     from . import banner, forecasts
     from ..live import STAMP, refresh
@@ -101,29 +154,35 @@ def main() -> None:
     ap.add_argument("--force", nargs=2, metavar=("KIND", "DAY"))
     a = ap.parse_args()
     now = pd.Timestamp.now(tz="Europe/Kyiv")
-    job = forced(*a.force) if a.force else what_now(wait_for_issue(now))
-    if not job:
+    if not a.force:
+        now = wait_for_issue(now)
+    job = forced(*a.force) if a.force else what_now(now)
+    if not job and not in_window(now):
         print(f"{now:%H:%M} Kyiv: nothing to publish")
         return
-    kind, day = job
     seed_history()
     refresh()
-    frame = forecasts.evening(day) if kind == "evening" else forecasts.morning(day)
-    rows = [{k: clean(v) for k, v in r.items()} for r in frame.to_dict("records")]
-    body = dict(kind=kind, day=day, rows=rows, banner=banner.fetch(pd.Timestamp.now(tz="UTC")), replace=bool(a.force),
-                data_end=newest_post(), checked_at=STAMP.read_text(encoding="utf-8").strip())
-    req = urllib.request.Request(os.environ["INGEST_URL"], data=json.dumps(body, ensure_ascii=False).encode(),
-                                 headers={"Content-Type": "application/json",
-                                          # Cloudflare rejects the default "Python-urllib" signature (error 1010)
-                                          "User-Agent": "shkilnyi-ranok-publisher/1.0",
-                                          "Authorization": f"Bearer {os.environ['INGEST_SECRET']}"})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            print(kind, day, "->", r.status, r.read().decode()[:200])
-    except urllib.error.HTTPError as e:
-        if e.code != 409:
-            raise SystemExit(f"{kind} {day} -> {e.code} {e.read().decode()[:200]}") from None
-        print(kind, day, "-> already published earlier today; kept the first version")
+    failed = None
+    if job:
+        kind, day = job
+        frame = forecasts.evening(day) if kind == "evening" else forecasts.morning(day)
+        rows = [{k: clean(v) for k, v in r.items()} for r in frame.to_dict("records")]
+        body = dict(kind=kind, day=day, rows=rows, banner=banner.fetch(pd.Timestamp.now(tz="UTC")), replace=bool(a.force),
+                    data_end=newest_post(), checked_at=STAMP.read_text(encoding="utf-8").strip())
+        status, text = post(body)
+        if status == 409:
+            print(kind, day, "-> already published earlier today; kept the first version")
+        elif status != 200:
+            failed = f"{kind} {day} -> {status} {text}"
+        else:
+            print(kind, day, "->", status, text)
+    try:  # best effort, after the school forecast and whatever happened to it
+        for body in extras(pd.Timestamp.now(tz="Europe/Kyiv")):
+            print(body["kind"], "->", *post(body))
+    except Exception as e:  # noqa: BLE001 - never block the school forecast on the hourly extras
+        print("extras failed:", type(e).__name__, str(e)[:200])
+    if failed:
+        raise SystemExit(failed)
 
 
 if __name__ == "__main__":

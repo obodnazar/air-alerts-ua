@@ -5,13 +5,16 @@ name: forecast
 on:
   schedule:
     # main runs start ~20 min early and wait for 20:00 / 08:00 inside the script (GitHub cron is often 5-20 min late);
-    # the later ones are backups, the Worker answers 409 if the forecast is already in
-    - cron: "41 16 * * 0-4"  # 19:41 Kyiv in summer time
-    - cron: "41 17 * * 0-4"  # 19:41 Kyiv in winter time (20:41 in summer: backup)
-    - cron: "5 18 * * 0-4"   # 20:05 Kyiv in winter time (21:05 in summer: backup)
-    - cron: "41 4 * * 1-5"   # 07:41 Kyiv in summer time
-    - cron: "41 5 * * 1-5"   # 07:41 Kyiv in winter time (08:41 in summer: backup)
-    - cron: "2 6 * * 1-5"    # 08:02 Kyiv in winter time (09:02 in summer: backup)
+    # the later ones are backups, the Worker answers 409 if the forecast is already in.
+    # Every day, not only school days: the hourly-risk parameters and the alert history are sent on weekends too
+    # (the script skips the school forecast itself when the target day has no school). Still two windows a day:
+    # the live "now" comes from the Worker's own scrape, never from frequent Actions runs.
+    - cron: "41 16 * * *"  # 19:41 Kyiv in summer time
+    - cron: "41 17 * * *"  # 19:41 Kyiv in winter time (20:41 in summer: backup)
+    - cron: "5 18 * * *"   # 20:05 Kyiv in winter time (21:05 in summer: backup)
+    - cron: "41 4 * * *"   # 07:41 Kyiv in summer time
+    - cron: "41 5 * * *"   # 07:41 Kyiv in winter time (08:41 in summer: backup)
+    - cron: "2 6 * * *"    # 08:02 Kyiv in winter time (09:02 in summer: backup)
   workflow_dispatch:
     inputs:
       force:

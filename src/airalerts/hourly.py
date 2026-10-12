@@ -50,9 +50,11 @@ def minute(t: pd.Timestamp) -> float:
 
 
 def kyiv_minute(day: pd.Timestamp, hour: int) -> float:
-    """UTC minute of h:00 Kyiv local time on a calendar day."""
+    """UTC minute of h:00 Kyiv local time on a calendar day. On the autumn DST switch 03:00 happens twice: the
+    first one (summer time) is taken; a missing spring hour moves forward. The Worker's kyivToUtc does the same."""
     d = pd.Timestamp(day)
-    return minute(pd.Timestamp(d.year, d.month, d.day, hour, tz=KYIV_TZ))
+    local = pd.Timestamp(d.year, d.month, d.day, hour).tz_localize(KYIV_TZ, ambiguous=True, nonexistent="shift_forward")
+    return minute(local)
 
 
 def kyiv_hours(minutes: np.ndarray) -> np.ndarray:
