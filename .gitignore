@@ -26,3 +26,4 @@ venv/
 !data/snapshot/
 !data/snapshot/*.parquet
 !data/snapshot/*.json
+results/live/bot_*.csv
