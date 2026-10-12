@@ -2,7 +2,8 @@ name = "shkilnyi-ranok"
 main = "src/index.js"
 compatibility_date = "2026-09-01"
 
-# every 5 minutes; the code decides by Kyiv local time what is due (handles the 25 Oct DST switch)
+# every 5 minutes: read t.me/s/UkraineAlarmSignal for the live alert state, then deliver what is due by Kyiv local
+# time (handles the 25 Oct DST switch)
 [triggers]
 crons = ["*/5 * * * *"]
 

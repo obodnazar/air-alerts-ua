@@ -5,13 +5,16 @@ import { Router } from "./router.js";
 import { catalog } from "./catalog.js";
 import * as ui from "./ui.js";
 import { kyivNow, addDays, weekday, plusMinutes } from "./util.js";
+import { scrape } from "./live.js";
 
 const SLOTS = { evening: ["20:00", "20:30", "21:00"], morning: ["08:05"] };
 const LATE = 90;        // minutes a slot may still go out after its time
 const TG_BUDGET = 40;   // Workers Free: 50 external subrequests per invocation, shared by all slots of one run
+                        // and the live scrape (≤ PAGES = 5 fetches): 45 at most
 const CLAIM = 200;      // rows claimed per slot and run; those not sent (budget spent) go back to pending
 const COMMANDS = [{ command: "now", description: "🌙 прогноз на найближчий шкільний день" },
   { command: "settings", description: "⚙️ райони, контрольна точка, час, стиль порад" },
+  { command: "hours", description: "🕐 ризик тривоги на обрану годину" }, { command: "recent", description: "📜 останні тривоги" },
   { command: "start", description: "📍 обрати або додати район" }, { command: "pause", description: "⏸ пауза на канікули" },
   { command: "help", description: "❓ команди і як читати прогноз" }, { command: "stop", description: "🔕 відписатися" }];
 // shown in the empty chat before /start ("What can this bot do?") and on the profile
@@ -58,6 +61,45 @@ export function invalid(body, units = new Set(catalog.units)) {
     }
   }
   if (body.banner != null && typeof body.banner !== "string") return "banner";
+  return null;
+}
+
+const GRID = 288; // hourly.py: 48 h on a 10-minute grid
+const isNum = (v, lo = -Infinity, hi = Infinity) => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
+const isArr = (a, n, ok) => Array.isArray(a) && a.length === n && a.every(ok);
+const LEVELS = new Set(["red", "yellow", null]);
+
+/** kind "hourly": per-raion parameters of the hour model (hourly.payload in Python). Error string or null. */
+export function invalidHourly(b, units = new Set(catalog.units)) {
+  if (!isDay(b.as_of)) return "as_of";
+  if (b.step !== 10) return "step";
+  if (!b.units || typeof b.units !== "object" || Array.isArray(b.units)) return "units";
+  const names = Object.keys(b.units);
+  if (!names.length || names.length > units.size) return "units";
+  for (const u of names) {
+    const r = b.units[u];
+    if (!units.has(u) || !r || !isArr(r.clim, 24, (v) => isNum(v, 0, 1)) || !isArr(r.prof, 24, (v) => isNum(v, 0, 1))
+      || !(r.prof.reduce((a, v) => a + v, 0) > 0)) return `unit ${u.slice(0, 40)}`;
+  }
+  if (!isArr(b.surv, GRID + 1, (v) => isNum(v, 0, 1)) || b.surv.some((v, i) => i && v > b.surv[i - 1])) return "surv";
+  const g = b.gates;
+  if (!g || !Array.isArray(g.buckets) || !g.buckets.length || g.buckets.length > 24
+    || !g.buckets.every((x) => isArr(x, 2, (v) => Number.isInteger(v) && v >= 1 && v <= 48) && x[0] <= x[1])) return "gates";
+  for (const k of ["on", "off"]) if (!isArr(g[k], g.buckets.length, (v) => typeof v === "boolean")) return "gates";
+  return null;
+}
+
+/** kind "alerts": alert history per raion from the Python parser, to heal the live state. Error string or null. */
+export function invalidAlerts(b, units = new Set(catalog.units)) {
+  if (!Number.isInteger(b.max_post_id) || b.max_post_id <= 0) return "max_post_id";
+  if (!isNum(b.data_end, 1.7e12, 4e12) || !isNum(b.since, 1.7e12, b.data_end)) return "data_end/since";
+  if (!Array.isArray(b.alerts) || b.alerts.length > 20000) return "alerts";
+  for (const a of b.alerts) {
+    if (!Array.isArray(a) || a.length !== 5 || !units.has(a[0]) || !Number.isInteger(a[1]) || a[1] < b.since || a[1] > b.data_end
+      || !(a[2] === null || (Number.isInteger(a[2]) && a[2] >= a[1] && a[2] <= b.data_end)) || !LEVELS.has(a[3]) || !LEVELS.has(a[4])) {
+      return `alert ${String(a?.[0]).slice(0, 40)}`;
+    }
+  }
   return null;
 }
 
@@ -129,9 +171,18 @@ export default {
     if (request.method === "POST" && url.pathname === "/ingest") {
       if (!(await sameSecret(bearer(request), env.INGEST_SECRET))) return new Response("forbidden", { status: 403 });
       const body = await request.json().catch(() => null);
+      const store = new Store(env.DB);
+      if (body?.kind === "hourly" || body?.kind === "alerts") {
+        const bad = body.kind === "hourly" ? invalidHourly(body) : invalidAlerts(body);
+        if (bad) return Response.json({ ok: false, error: bad }, { status: 400 });
+        if (body.kind === "hourly") {
+          await store.saveHourly(body.as_of, { as_of: body.as_of, step: body.step, units: body.units, surv: body.surv, gates: body.gates });
+          return Response.json({ ok: true, units: Object.keys(body.units).length });
+        }
+        return Response.json({ ok: true, ...(await store.applySeed(body)) });
+      }
       const bad = invalid(body);
       if (bad) return Response.json({ ok: false, error: bad }, { status: 400 });
-      const store = new Store(env.DB);
       // first version wins: the workflow fires at two UTC times (summer/winter), and every subscriber of a day
       // must get the same numbers. A manual re-run passes replace: true.
       if (!body.replace && (await store.forecast(body.kind, body.day))) return Response.json({ ok: true, kept: "existing" }, { status: 409 });
@@ -164,7 +215,13 @@ export default {
     return new Response("not found", { status: 404 });
   },
 
+  // One cron for both jobs: a second schedule (minutes 2, 7, 12…) was deployed on 12 Oct and never fired.
+  // The scrape goes first and cannot block delivery: its failure is logged, and live_ok is not renewed.
   async scheduled(event, env) {
+    try {
+      const r = await scrape(new Store(env.DB), (...a) => fetch(...a), catalog.units, event.scheduledTime);
+      if (r.posts || r.gap) console.log(JSON.stringify({ scrape: r }));
+    } catch (e) { console.log("scrape failed", String(e?.message || e).slice(0, 200)); } // the bot then says "no fresh data"
     await runDue(env, event.scheduledTime);
   },
 };

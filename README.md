@@ -10,6 +10,7 @@ KSE Agentic AI School 2026, Stage 2. Time series analysis of air raid alerts in 
 > - **Усі три прогнози значуще кращі** за найсильніше просте правило: о 07:00 на +7.8%, о 20:00 на +5.1%, відбій до 10:00 на +12.2%.
 > - Найбільший виграш для шкіл дає **вибір контрольної точки під свій район**.
 > - Порайонні тривоги зберегли **1 910 шкільних ранків**.
+> - Після дедлайну (12.10): кнопка «🕐 Ризик по годинах». Модель краща за історію лише **коли тривога вже йде**: на годину вперед на +16%, на 2–3 год на +8% і +5%. **Якщо тривоги немає, наступну вона не передбачає** краще за «як часто була тривога о цій годині за 28 днів», тож бот показує саме цю частку і прямо каже, що це історія. Деталі [нижче](#risk-by-hour-and-recent-alerts-after-submission-12-oct).
 
 ## The decision
 
@@ -78,7 +79,7 @@ Everything a model sees is computed **as of the issue time**. Plain-language wal
 
 Every change after registration is listed there with its time and reason, including one crashed test run.
 
-**Tests (82):** the parser on real post formats (incl. multi-section posts), the MoE rule, censoring, stitching at the source switch, the bot (see below), and **leakage controls** ([tests/test_leakage.py](tests/test_leakage.py)):
+**Tests (Python 146, Worker JS 39):** the parser on real post formats (incl. multi-section posts), the MoE rule, censoring, stitching at the source switch, the bot (see below), and **leakage controls** ([tests/test_leakage.py](tests/test_leakage.py)):
 - `available_at <= issue_time` on every row;
 - **every feature column at 20:00, 07:00 and 08:00** recomputed on a world **truncated at the issue time** equals the full-data value;
 - a **mutation test**: a feature made to peek one hour ahead must make that check fail;
@@ -219,6 +220,56 @@ These were designed after seeing the test and the live morning, so they are repo
 | Would a later evening forecast (21:30, 22:00) or neighbouring raions help? | Tested on validation ([experiments.py](src/airalerts/experiments.py)) | No: neither 21:30/22:00 nor neighbours beat the 20:00 base model on validation. Kept the simpler model |
 | Can news predict alerts? Keyword watcher on Lachen (8 570 posts) + Air Force | [events.py](src/airalerts/events.py): mass-attack warnings, truce, retaliation threats | Warnings precede a mass night 1.5× more often but cover only 17% of them, and add nothing meaningful to the 20:00 model (gain 1e-5). After truce news, alerts fell in 5 of 7 cases (n too small to claim). News fits as a banner, not as a feature |
 
+## Risk by hour and recent alerts (after submission, 12 Oct)
+
+A bot button asked for after the deadline: *"is an alert likely in my raion at 15:00 today, or tomorrow?"*, to decide whether to go out now or stay. Post-hoc by construction. Its spec and display rule were committed **before** the backtest ran ([PREREG.md](PREREG.md), item 12; [hourly.py](src/airalerts/hourly.py)).
+
+- **Target:** alert on in the raion at a whole hour h:00, from the next hour up to 23:00 tomorrow (leads 1–47 h).
+- **Baseline ("history"):** the share of the last 28 days with an alert at h:00 in that raion.
+- **Model:** the baseline adjusted for what is happening now.
+  - Alert on: the chance it is still on at h:00, from a Kaplan–Meier curve of alert durations conditional on how long it has already run, plus the chance that a new alert starts after it ends and is still on at h:00.
+  - No alert: the chance that an alert starting between now and h:00 is still on at h:00 (start times by hour, per raion, shrunk to the oblast). Far ahead this tends to the baseline.
+- **Rolling backtest:** every day 15 Sep – 12 Oct, weekdays and weekends, issued at every hour. 104 raions, 2.4 M forecasts; Brier skill vs the baseline; paired 3-day block bootstrap, as for M1.
+- **Leakage:** the truncation test now runs **at every hour of a weekday and a Sunday** (h:00 and h:37). Parameters, state and every forecast up to 23:00 tomorrow must equal what a world cut at that moment gives. A mutation test (the state reads one hour ahead) must fail it.
+
+| Alert at the moment of asking | Lead | Brier skill vs history [95% CI] | Bot shows |
+|---|---|---|---|
+| **on** | 1 h | **+16.0%** [+7.0, +24.2] | model |
+| **on** | 2 h | **+8.0%** [+2.0, +13.9] | model |
+| **on** | 3 h | **+4.8%** [+0.8, +9.0] | model |
+| **on** | 4–6 h | **+2.3%** [+0.4, +4.3] | model |
+| **on** | 7–12 h | +0.4% [+0.1, +0.6] | model |
+| on | 13–47 h | 0.0% | history |
+| off | 1 h | +1.9% [−1.0, +5.6], not significant | history |
+| off | 2–47 h | +0.0 … +0.8%, no CI excludes 0 | history |
+
+The rule: the model is shown only where the CI is above 0 **and** both halves of the period (15–28 Sep, 29 Sep – 12 Oct) agree. Full table: [posthoc_hourly_summary.csv](results/posthoc_hourly_summary.csv); gates the bot reads: [hourly_gates.json](results/hourly_gates.json).
+
+**The honest result is narrow.**
+- The model helps **only while an alert is on**, and mostly for the next 1–3 hours: how likely the alert is to still be on, or to be on again.
+- **With no alert now, it cannot predict the next one** better than how often there was an alert at that hour over 4 weeks. The bot then shows exactly that share, labelled as history and not as a forecast.
+- **It is too low**: 57% at 1 h against 61% observed while an alert is on. Alerts cluster more than independent starts allow. Recalibrating it would need a new period to check on.
+
+**Live data for "now".** Forecasts arrive only twice a day, too stale for "now". So the Worker reads the public web preview of @UkraineAlarmSignal (t.me/s) itself every 5 minutes, at the start of the same cron run that delivers messages, and keeps open and recent alerts per raion in D1. GitHub Actions still runs only twice a day: it sends the hourly parameters and the last 7 days of alerts per raion, and that history heals anything the Worker missed.
+
+| Check (Workers Free plan) | Measured |
+|---|---|
+| Posts per 5 min since 1 Sep | median 3, 99.9% ≤ 17, max 28; the live page shows 20, the budget is 5 pages (100) per run |
+| CPU to parse and apply one real 94 KB page | 0.1 ms warm, ~2 ms cold (limit 10 ms) |
+| CPU for an /ingest of the history (255 KB, 3 621 alerts) or parameters (45 KB) | 2.5–3.9 ms cold, incl. validation |
+| D1 per scrape run | 4 queries (limit 50); rows written only for alerts that changed |
+| Parser parity with Python | 600 real posts incl. multi-section ones: the same 293 episodes; a saved live page: the same 20 posts |
+| Model parity with Python | 291 cases incl. the 25 Oct DST switch, equal to 1e-9 |
+
+- **Not testable before deploy:** whether t.me answers requests from Cloudflare's network.
+- **If the data are stale or have a hole,** the bot says it does not know the current state and shows history only. This covers a page with no posts, a fetch error, more than 15 minutes since the last good read, or more new posts than the page budget. It never says "no alert" on old data.
+
+**In the bot:**
+- **🕐 Ризик по годинах:** pick Сьогодні or Завтра, then an hour (four buttons per row; today starts after the current hour).
+- **📜 Останні тривоги:** the last 5 alerts per raion, with start, end and duration, plus today's count and total time. It is pure fact, with no model.
+- **While an alert is on,** the screen opens with "be in the shelter, follow official alerts, do not plan to go out before the all-clear". Every screen ends with "for planning, not a safety signal".
+- **Callbacks** are whitelisted like the rest: the raion must be one the chat follows, the day 0/1, the hour 0–23 and in the future. 15 forged payloads are tested.
+
 ## Evening brief
 
 `python -m airalerts.brief --day 2026-10-13` writes one line per raion: the chance of an alert at 08:00, the chance of an all-clear by 10:00 (per raion), the chance of a fully remote day, and plain advice. `--issue 08:00` gives the morning update: for each raion under alert, the chance of an all-clear by 10:00 given the alert's colour and how long it has run, with "wait" or "call the remote day now". The text comes from a template, with no LLM: every number in it comes straight from the models.
@@ -294,6 +345,8 @@ export PYTHONPATH=src
 | `src/airalerts/dataset.py`, `attacks.py`, `airforce.py` | as-of-time features |
 | `src/airalerts/models.py`, `policies.py`, `evaluate.py` | models, MoE decision rule, registered evaluation |
 | `src/airalerts/levels.py`, `cost.py`, `clearance.py`, `geo.py` | all-clear by colour; price of alerts for schools; per-raion all-clear; occupied raions from the map |
+| `src/airalerts/hourly.py` | risk by hour per raion (post-hoc, PREREG item 12): model, rolling backtest, parameters for the bot |
+| `deploy/cloudflare/worker/` | the hosted bot: Telegram webhook, delivery, live scrape of t.me/s, hourly risk (JS) |
 | `data/snapshot/` | parsed alerts (15 Aug – 12 Oct) and occupied shares, for fast reproduction |
 | `src/airalerts/brief.py`, `live.py` | evening brief; live forecast and check |
 | `PREREG.md` | the registered evaluation and every later change |

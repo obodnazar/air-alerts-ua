@@ -19,3 +19,7 @@ CREATE TABLE IF NOT EXISTS forecasts (kind TEXT, day TEXT, body TEXT, received T
 CREATE TABLE IF NOT EXISTS hits (chat_id INTEGER, t INTEGER);
 CREATE INDEX IF NOT EXISTS hits_chat ON hits (chat_id, t);
 CREATE INDEX IF NOT EXISTS hits_t ON hits (t);
+-- live alerts per raion: the Worker's own 5-minute scrape of t.me/s/UkraineAlarmSignal, healed twice a day by the
+-- alert history GitHub Actions sends to /ingest (kind "alerts"). ended IS NULL = still on. Times in ms (UTC).
+CREATE TABLE IF NOT EXISTS alerts (unit TEXT, started INTEGER, ended INTEGER, level TEXT, max_level TEXT, PRIMARY KEY (unit, started));
+CREATE INDEX IF NOT EXISTS alerts_open ON alerts (ended, unit);

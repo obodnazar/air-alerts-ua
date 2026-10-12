@@ -139,3 +139,51 @@ def test_airforce_counts_use_only_posts_before_issue():
         for minutes in (60, 180):
             assert full.count(ob, T, minutes) == cut.count(ob, T, minutes)
     assert full.count_all(T, 180) == cut.count_all(T, 180)
+
+
+# ---------- hourly risk (PREREG item 12): asked at any time, so checked at every hour ----------
+
+def hourly_inputs(store, units, day, T):
+    from airalerts import hourly as H
+
+    par = H.params_asof(store, units, day)
+    on, start = H.state_at(store, units, np.array([_minute(T)]))
+    targets = [H.kyiv_minute(dd, h) for dd in (day, day + pd.Timedelta(days=1)) for h in range(24)]
+    el = _minute(T) - start[:, 0]
+    p = [H.forecast(par, np.arange(len(units)), on[:, 0], el, x, int(round((x - _minute(T)) / H.STEP)))
+         for x in targets if x > _minute(T)]
+    return par, on[:, 0], np.nan_to_num(el, nan=-1), np.array(p)
+
+
+@pytest.mark.parametrize("day", ["2026-09-23", "2026-10-04"])  # a weekday and a Sunday
+@pytest.mark.parametrize("hour", range(24))
+def test_hourly_inputs_equal_on_truncated_world(world, day, hour):
+    """Parameters, state and every forecast (to 23:00 tomorrow), at h:00 and h:37 of every hour, from a world cut
+    at that time."""
+    store, reports = world
+    units = store.units
+    d = pd.Timestamp(day)
+    for minute in (0, 37):
+        T = kyiv(d, f"{hour:02d}:{minute:02d}")
+        st, _ = truncate(store, reports, T)
+        full, cut = hourly_inputs(store, units, d, T), hourly_inputs(st, units, d, T)
+        for k in ("clim", "prof", "surv"):
+            np.testing.assert_array_equal(full[0][k], cut[0][k])
+        for a, b in zip(full[1:], cut[1:]):
+            np.testing.assert_array_equal(a, b)
+
+
+def test_hourly_truncation_check_catches_a_one_hour_peek(world, monkeypatch):
+    """Mutation test: let the state read one hour ahead; the check above must now fail."""
+    from airalerts import hourly as H
+
+    store, reports = world
+    d = pd.Timestamp("2026-09-23")
+    T = kyiv(d, "07:00")
+    st, _ = truncate(store, reports, T)
+    orig = H.state_at
+    monkeypatch.setattr(H, "state_at", lambda s, u, m: orig(s, u, np.asarray(m, dtype=float) + 60))
+    full, cut = hourly_inputs(store, store.units, d, T), hourly_inputs(st, store.units, d, T)
+    with pytest.raises(AssertionError):
+        for a, b in zip(full[1:], cut[1:]):
+            np.testing.assert_array_equal(a, b)

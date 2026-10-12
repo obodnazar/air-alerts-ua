@@ -3,6 +3,8 @@ import * as ui from "./ui.js";
 import { search } from "./catalog.js";
 import { MAX_UNITS } from "./store.js";
 import { toInt, kyivNow, addDays, weekday } from "./util.js";
+import { hourRisk, kyivOffset, kyivToUtc } from "./hourly.js";
+import { liveState } from "./live.js";
 
 export class Router {
   constructor(store, cat, tg, now = () => new Date()) {
@@ -20,6 +22,46 @@ export class Router {
     if (!f) return "Прогноз на наступний шкільний день з'явиться після 20:00. До того: /help";
     const rows = Object.fromEntries(f.rows.map((r) => [r.unit, r]));
     return ui.eveningMessage(sub, rows, day) || "Для ваших районів прогнозу немає.";
+  }
+
+  // ---------- 🕐 risk by hour and 📜 recent alerts ----------
+  /** "hr", "hr:<unit>", "hr:<unit>:<0|1>", "hr:<unit>:<0|1>:<hour>"; the unit must be one the chat follows. */
+  async hours(chat, mid, sub, val) {
+    const parts = val === "" ? [] : val.split(":");
+    if (parts.length > 3) return null;
+    const many = sub.units.length > 1;
+    if (!parts.length) { // from /hours: a new message; from a button: this message, so "← Назад" leads back
+      const show = (text, k) => (mid ? this.tg.edit(chat, mid, text, k) : this.tg.send(chat, text, k));
+      if (many) return show("🕐 <b>Ризик по годинах</b>\nДля якого району?", ui.hoursUnitKeyboard(sub.units, this.index));
+      return show(ui.hoursAskText(sub.units[0]), ui.hoursDayKeyboard(this.index[sub.units[0]], false));
+    }
+    const unit = this.unitAt(parts[0]);
+    if (!unit || !sub.units.includes(unit)) return "Цього району немає у ваших.";
+    const i = this.index[unit];
+    if (parts.length === 1) return this.tg.edit(chat, mid, ui.hoursAskText(unit), ui.hoursDayKeyboard(i, many));
+    if (!["0", "1"].includes(parts[1])) return null;
+    const d = Number(parts[1]), now = this.now(), k = kyivNow(now);
+    const from = d === 0 ? Number(k.hhmm.slice(0, 2)) + 1 : 0;
+    if (parts.length === 2) {
+      if (from > 23) return this.tg.edit(chat, mid, "На сьогодні годин уже не лишилося. Оберіть завтра:", ui.hoursDayKeyboard(i, many));
+      return this.tg.edit(chat, mid, ui.hoursPickText(unit, d), ui.hoursKeyboard(i, d, from));
+    }
+    const hour = toInt(parts[2]);
+    if (hour === null || hour < 0 || hour > 23) return null;
+    const day = addDays(k.day, d);
+    if (kyivToUtc(day, hour) <= now.getTime()) return "Ця година вже минула.";
+    const [params, meta, open] = await Promise.all([this.store.hourlyParams(), this.store.liveMeta(), this.store.openAlerts([unit])]);
+    const t = now.getTime(), live = liveState(meta, open[0], t);
+    const risk = hourRisk(params, unit, day, hour, t, live);
+    await this.tg.edit(chat, mid, ui.hourText(unit, d, hour, risk, live, meta.ok, kyivOffset(t)), ui.hourResultKeyboard(i, d));
+    return null;
+  }
+
+  async recent(chat, mid, sub, edit) {
+    const now = this.now().getTime(), k = kyivNow(this.now());
+    const [blocks, meta] = await Promise.all([this.store.recent(sub.units, kyivToUtc(k.day, 0), now), this.store.liveMeta()]);
+    const text = ui.recentText(sub.units, blocks, meta, now, kyivOffset(now));
+    return edit && mid ? this.tg.edit(chat, mid, text, ui.recentKeyboard()) : this.tg.send(chat, text, ui.recentKeyboard());
   }
 
   async handle(update) {
@@ -41,8 +83,10 @@ export class Router {
     }
     if (cmd === "/help") return this.tg.send(chat, ui.HELP, ui.helpKeyboard());
     if (cmd === "/stop") { if (sub) await this.store.set(chat, "active", 0); return this.tg.send(chat, "Відписано. Щоб повернутися, натисніть /start."); }
-    if (["/settings", "/now", "/pause"].includes(cmd)) {
+    if (["/settings", "/now", "/pause", "/hours", "/recent"].includes(cmd)) {
       if (!sub || !sub.units.length) return this.tg.send(chat, "Спершу оберіть район: /start");
+      if (cmd === "/hours") return this.hours(chat, null, sub, "");
+      if (cmd === "/recent") return this.recent(chat, null, sub, false);
       if (cmd === "/settings") return this.tg.send(chat, ui.settingsText(sub), ui.settingsKeyboard(sub));
       if (cmd === "/pause") return this.tg.send(chat, ...ui.screen("pause", sub));
       return this.tg.send(chat, await this.nowForecast(sub));
@@ -71,15 +115,26 @@ export class Router {
       await this.tg.send(chat, ui.HOW, ui.howKeyboard());
     } else if (kind === "help") {
       await this.tg.send(chat, ui.HELP, ui.helpKeyboard());
+    } else if (kind === "home" && val === "") {
+      if (sub && sub.units.length) await this.tg.edit(chat, mid, ui.menuText(sub), ui.welcomeBackKeyboard(sub));
+      else await this.tg.edit(chat, mid, ui.WELCOME, ui.welcomeKeyboard());
     } else if (kind === "back" || kind === "add") {
-      await this.tg.edit(chat, mid, "Оберіть область:", ui.oblastKeyboard(this.oblasts));
+      await this.tg.edit(chat, mid, "Оберіть область:", ui.oblastKeyboard(this.oblasts, kind === "add" && sub ? "s:units" : "home"));
     } else if (kind === "u" && this.unitAt(val)) {
       if (await this.store.addUnit(chat, this.unitAt(val))) await this.tg.edit(chat, mid, ui.doneText(await this.store.get(chat)), ui.doneKeyboard());
       else return `Можна стежити щонайбільше за ${MAX_UNITS} районами. Приберіть один у /settings.`;
-    } else if (kind === "rm" && this.unitAt(val) && sub) {
+    } else if (kind === "rm" && sub && sub.units.includes(this.unitAt(val))) {
+      await this.tg.edit(chat, mid, ...ui.removeConfirm(this.unitAt(val), toInt(val)));  // a mis-tap must not delete
+    } else if (kind === "rmy" && sub && sub.units.includes(this.unitAt(val))) {
       await this.store.removeUnit(chat, this.unitAt(val));
       const s = await this.store.get(chat);
       await this.tg.edit(chat, mid, "🏫 <b>Мої райони</b> (до 3)", ui.unitsKeyboard(s.units, this.index, s.units.length < MAX_UNITS));
+    } else if ((kind === "hr" || kind === "rc") && !(sub && sub.units.length)) {
+      return "Спершу оберіть район: /start";
+    } else if (kind === "hr") {
+      return this.hours(chat, mid, sub, val).then((r) => (typeof r === "string" ? r : null));
+    } else if (kind === "rc" && (val === "" || val === "1")) {
+      await this.recent(chat, mid, sub, true);
     } else if (kind === "now" && sub) {
       await this.tg.send(chat, await this.nowForecast(sub));
     } else if (kind === "s" && !sub) {

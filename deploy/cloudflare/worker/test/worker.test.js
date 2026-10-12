@@ -284,7 +284,7 @@ test("first contact explains who we are; a returning user gets shortcuts; help h
   await r.handle(msg("/start"));
   last = tg.calls.at(-1);
   assert.match(last[2], /З поверненням/);
-  assert.deepEqual(buttons(last[3]).map((b) => b.callback_data), ["now", "s:root", "add", "help"]);
+  assert.deepEqual(buttons(last[3]).map((b) => b.callback_data), ["now", "hr", "rc", "s:root", "add", "help"]);
   await r.handle(msg("/help"));
   assert.match(tg.calls.at(-1)[2], /\/settings/);
   assert.ok(tg.calls.at(-1)[3]);
@@ -307,4 +307,366 @@ test("a forecast is delivered right after /ingest, not at the next tick", async 
     await Promise.all(pending);
     assert.deepEqual(sent, [1]);
   } finally { globalThis.fetch = real; globalThis.Date = RealDate; }
+});
+
+// ---------- 🕐 hourly risk, 📜 recent alerts, live scrape (12 Oct, after submission) ----------
+import { parsePage, toEvents, applyEvents, unitType, unescapeHtml } from "../src/signal.js";
+import { kyivOffset, kyivHour, kyivToUtc, coverageShare, forecastOne, bucketOf, hourRisk } from "../src/hourly.js";
+import { scrape, liveState, PAGES } from "../src/live.js";
+import { invalidHourly, invalidAlerts } from "../src/index.js";
+
+const fixture = (f) => JSON.parse(readFileSync(new URL(`./fixtures/${f}`, import.meta.url), "utf8"));
+const SIG = fixture("signal_parity.json"), HOURLY = fixture("hourly_parity.json");
+const PAGE = readFileSync(new URL("./fixtures/tme_page.html", import.meta.url), "utf8");
+const SIG_POSTS = SIG.posts.map((p) => ({ ...p, published_at: Date.parse(p.published_at) }));
+const MINUTE = 60000;
+
+/** A t.me/s page in the real markup's shape (text escaped the way t.me escapes it). */
+const tmePage = (posts) => posts.map((p) => `<div class="tgme_widget_message_wrap js-widget_message_wrap"><div class="tgme_widget_message js-widget_message" data-post="UkraineAlarmSignal/${p.id}">` +
+  `<div class="tgme_widget_message_text js-message_text" dir="auto">${p.text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/'/g, "&#39;").replace(/!/g, "&#33;").replace(/\n/g, "<br/>")}</div>` +
+  `<span class="tgme_widget_message_meta"><time datetime="${new Date(p.published_at).toISOString().replace(".000Z", "+00:00")}" class="time">x</time></span></div></div>`).join("\n");
+/** A fake t.me: the live page shows the newest 20 posts up to `head`; ?before=X the 20 before X. */
+function fakeTme(posts) {
+  const fake = { head: 0, calls: 0 };
+  fake.fetch = async (url) => {
+    fake.calls++;
+    const before = Number(new URL(url).searchParams.get("before")) || Infinity;
+    const visible = posts.filter((p) => p.id <= fake.head && p.id < before).slice(-20);
+    return new Response(tmePage(visible));
+  };
+  return fake;
+}
+
+test("signal: the real t.me page parses exactly as Python's scraper does", () => {
+  const got = parsePage(PAGE), want = fixture("tme_page.json");
+  assert.equal(got.length, 20);
+  assert.deepEqual(got.map((p) => [p.id, p.published_at, p.text]), want.map((p) => [p.id, Date.parse(p.published_at), p.text]));
+  assert.equal(unescapeHtml("&#33;&#39;&amp;&lt;&nbsp;&bogus;"), "!'&< &bogus;");
+});
+
+test("signal: 600 real posts give Python's events and Python's raion episodes", () => {
+  const ev = toEvents(SIG_POSTS);
+  assert.deepEqual(ev.map((e) => [e.post, e.unit, e.oblast, e.kind, e.level]), SIG.events.filter((e) => e[3] !== "threat")); // threats pair nothing
+  const open = {}, rows = applyEvents(open, ev, (u) => ["raion", "kyiv"].includes(unitType(u)));
+  const key = (r) => JSON.stringify(r);
+  const got = rows.map((r) => [r.unit, r.started, r.ended, r.max_level, r.level]).map(key).sort();
+  assert.deepEqual(got, SIG.episodes.map(key).sort());
+});
+
+test("signal: CPU per scrape stays far below the 10 ms Free limit", () => {
+  const t0 = performance.now();
+  for (let i = 0; i < 50; i++) {
+    const posts = parsePage(PAGE);
+    applyEvents({}, toEvents(posts), () => true);
+  }
+  const ms = (performance.now() - t0) / 50;
+  console.log(`scrape: ${ms.toFixed(2)} ms CPU to parse and apply one real page (${(PAGE.length / 1024).toFixed(0)} KB)`);
+  assert.ok(ms < 4, `parse + apply too slow: ${ms} ms`);
+});
+
+test("hourly: JS forecasts equal Python's on 291 cases, incl. the 25 Oct DST switch", () => {
+  const { params, cases } = HOURLY;
+  assert.equal(invalidHourly(params), null);
+  for (const c of cases) {
+    assert.equal(kyivToUtc(c.day, c.hour), c.target, `${c.day} ${c.hour}`);
+    assert.equal(kyivHour(c.target), c.local_hour);
+    assert.equal(Math.floor((c.target - c.now) / (10 * MINUTE)), c.steps);
+    assert.equal(bucketOf(params.gates.buckets, (c.target - c.now) / 3600000), c.bucket);
+    const u = params.units[c.unit], cs = coverageShare(u.prof, params.surv, c.target, 10);
+    const p = forecastOne(u.clim[c.local_hour], cs, params.surv, c.on, c.elapsed, Math.min(c.steps, 288));
+    assert.ok(Math.abs(p - c.p) < 1e-9, `${JSON.stringify(c)}: ${p}`);
+  }
+});
+
+test("hourly: the Kyiv offset rule equals Intl for every hour of 2026 and 2027", () => {
+  const fmt = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Kyiv", hour: "2-digit", hourCycle: "h23" });
+  for (let t = Date.UTC(2026, 0, 1); t < Date.UTC(2028, 0, 1); t += 3600000) assert.equal(kyivHour(t), Number(fmt.format(t)), new Date(t).toISOString());
+  assert.equal(kyivOffset(Date.UTC(2026, 9, 25, 0, 59)), 180);
+  assert.equal(kyivOffset(Date.UTC(2026, 9, 25, 1, 0)), 120);
+});
+
+test("hourly: the model is shown only where the backtest earned it; no live data -> history only", () => {
+  const { params } = HOURLY, now = Date.parse("2026-10-12T11:20:00Z"); // 14:20 Kyiv
+  const on = hourRisk(params, "Київ", "2026-10-12", 15, now, { on: true, elapsed: 30 });
+  assert.ok(on.model > 0 && on.bucket === 0);                                     // alert on, 1 h: model
+  assert.equal(hourRisk(params, "Київ", "2026-10-12", 15, now, { on: false, elapsed: 0 }).model, null); // no alert: history
+  assert.equal(hourRisk(params, "Київ", "2026-10-13", 22, now, { on: true, elapsed: 30 }).model, null); // 32 h ahead: history
+  assert.equal(hourRisk(params, "Київ", "2026-10-12", 15, now, null).model, null);     // stale live data
+  assert.ok(hourRisk(params, "Київ", "2026-10-12", 14, now, null).past);
+  assert.equal(hourRisk(params, "Неіснуючий район", "2026-10-12", 15, now, null), null);
+});
+
+test("live: 5-minute ticks over 600 real posts end with Python's episodes for the served raions", async () => {
+  const store = new Store(fakeD1()), tme = fakeTme(SIG_POSTS), units = catalog.units;
+  await store.saveLive([], { last: SIG_POSTS[0].id - 1, ok: 1, gapTo: 0 });
+  let t = SIG_POSTS[0].published_at, i = 0;
+  while (i < SIG_POSTS.length) {
+    t += 5 * MINUTE;
+    while (i < SIG_POSTS.length && SIG_POSTS[i].published_at <= t) i++;
+    if (!i) continue;
+    tme.head = SIG_POSTS[i - 1].id;
+    const r = await scrape(store, tme.fetch, units, t);
+    assert.equal(r.gap, false);
+  }
+  const want = SIG.episodes.filter((e) => units.includes(e[0])).map((e) => JSON.stringify(e.slice(0, 4))).sort();
+  const rows = store.db.raw.prepare("SELECT unit, started, ended, max_level FROM alerts").all();
+  assert.deepEqual(rows.map((r) => JSON.stringify([r.unit, r.started, r.ended, r.max_level])).sort(), want);
+});
+
+test("live: one tick uses at most 4 D1 queries and PAGES fetches; a burst beyond the budget is flagged as a gap", async () => {
+  const db = fakeD1(), store = new Store(db), tme = fakeTme(SIG_POSTS);
+  await store.saveLive([], { last: SIG_POSTS[0].id - 1, ok: 1, gapTo: 0 });
+  tme.head = SIG_POSTS[30].id;                                     // 31 new posts: two pages
+  db.queries = 0; tme.calls = 0;
+  const r = await scrape(store, tme.fetch, catalog.units, 1e12);
+  assert.equal(r.posts, 31); assert.equal(r.gap, false);
+  assert.ok(db.queries <= 4, `D1 queries: ${db.queries}`);
+  assert.equal(tme.calls, 2);
+  tme.head = SIG_POSTS[30 + 20 * PAGES + 5].id;                    // more new posts than PAGES pages hold
+  tme.calls = 0;
+  const g = await scrape(store, tme.fetch, catalog.units, 1e12 + 5 * MINUTE);
+  assert.equal(tme.calls, PAGES); assert.equal(g.gap, true);
+  const meta = await store.liveMeta();
+  assert.equal(meta.last, tme.head);
+  assert.equal(liveState(meta, null, 1e12 + 6 * MINUTE), null);    // unknown "now" until the gap is healed
+});
+
+test("live: first run knows nothing before its page; an empty or blocked page renews nothing", async () => {
+  const store = new Store(fakeD1()), tme = fakeTme(SIG_POSTS);
+  tme.head = SIG_POSTS[100].id;
+  assert.equal((await scrape(store, tme.fetch, catalog.units, 1e12)).gap, true);
+  const ok = (await store.liveMeta()).ok;
+  await assert.rejects(scrape(store, async () => new Response("<html>captcha</html>"), catalog.units, 1e12 + MINUTE));
+  await assert.rejects(scrape(store, async () => new Response("", { status: 429 }), catalog.units, 1e12 + MINUTE));
+  assert.equal((await store.liveMeta()).ok, ok);
+  assert.equal(liveState({ ok, gapTo: 0 }, null, ok + 16 * MINUTE), null); // stale after 15 min
+  assert.deepEqual(liveState({ ok, gapTo: 0 }, null, ok + 5 * MINUTE), { on: false, elapsed: 0, level: null });
+});
+
+test("seed from /ingest: heals missed posts, an all-clear wins, artifacts go, the gap closes", async () => {
+  const store = new Store(fakeD1()), H = 3600000, t0 = Date.parse("2026-10-12T06:00:00Z");
+  // the Worker's own view: it missed the start of Kyiv's alert and saw only a level change (an artifact), it missed
+  // the all-clear of Buchanskyi, and it saw a newer all-clear of Kharkivskyi that the seed does not know yet
+  await store.saveLive([
+    { unit: "Київ", started: t0 + 4 * H, ended: null, level: "red", max_level: "red" },                         // artifact, after data_end
+    { unit: "Бучанський район", started: t0, ended: null, level: "yellow", max_level: "yellow" },
+    { unit: "Харківський район", started: t0 + H, ended: t0 + 5 * H, level: "red", max_level: "red" },
+    { unit: "Броварський район", started: t0 - H, ended: t0 - H / 2, level: "yellow", max_level: "yellow" }, // not in the seed
+    { unit: "Обухівський район", started: t0 + 6 * H, ended: null, level: "yellow", max_level: "yellow" },     // after data_end
+  ], { last: 900, ok: t0 + 6 * H, gapTo: 800 });
+  const seed = { kind: "alerts", max_post_id: 850, data_end: t0 + 3 * H, since: t0 - 2 * H, alerts: [
+    ["Київ", t0 + H, null, "yellow", "yellow"],
+    ["Бучанський район", t0, t0 + H, "yellow", "yellow"],
+    ["Харківський район", t0 + H, null, "red", "red"],
+  ] };
+  assert.equal(invalidAlerts(seed), null);
+  await store.applySeed(seed, t0 + 6 * H);
+  const rows = Object.fromEntries(store.db.raw.prepare("SELECT * FROM alerts").all().map((r) => [`${r.unit}@${(r.started - t0) / H}`, r]));
+  assert.deepEqual(Object.keys(rows).sort(), ["Бучанський район@0", "Київ@1", "Обухівський район@6", "Харківський район@1"]);
+  assert.equal(rows["Бучанський район@0"].ended, t0 + H);          // the all-clear the Worker missed
+  assert.equal(rows["Харківський район@1"].ended, t0 + 5 * H);     // the Worker's newer all-clear stays
+  assert.equal(rows["Київ@1"].ended, null);                         // the real start; the artifact at +4 h is gone
+  assert.equal(rows["Київ@1"].level, "yellow");                     // the Worker (post 900) is newer than the seed (850)
+  const meta = await store.liveMeta();
+  assert.equal(meta.last, 900); assert.equal(meta.gapTo, 0);         // the seed reaches post 850, past the gap (800)
+  await store.saveLive([], { ...meta, gapTo: 870 });
+  await store.applySeed({ ...seed, alerts: [] }, t0 + 6 * H);
+  assert.equal((await store.liveMeta()).gapTo, 870);                 // a seed that ends before the gap does not close it
+});
+
+// ---------- the bot screens ----------
+const LIVE_OK = Date.parse("2026-10-12T11:15:00Z");
+const hoursSetup = async ({ open = null, ok = LIVE_OK, gapTo = 0, params = HOURLY.params } = {}) => {
+  const env = setup();
+  await env.store.addUnit(1, "Київ");
+  await env.store.saveHourly("2026-10-11", params);
+  await env.store.saveLive(open ? [open] : [], { last: 10, ok, gapTo });
+  let t = Date.parse("2026-10-12T11:20:00Z");                        // 14:20 Kyiv
+  env.r.now = () => new Date((t += 1000));
+  return env;
+};
+const K = `${catalog.units.indexOf("Київ")}`;
+const lastEdit = (tg) => tg.calls.filter((c) => c[0] === "edit").at(-1);
+
+test("🕐 hour risk: one raion -> day -> hours after now, four to a row -> result", async () => {
+  const { r, tg } = await hoursSetup();
+  await r.handle(msg("/hours"));
+  assert.match(tg.calls.at(-1)[2], /Ризик по годинах · Київ/);
+  assert.deepEqual(buttons(tg.calls.at(-1)[3]).map((b) => b.callback_data), [`hr:${K}:0`, `hr:${K}:1`, "home"]);
+  await r.handle(cb(`hr:${K}:0`));
+  const hours = lastEdit(tg)[3].inline_keyboard;
+  assert.equal(hours[0][0].text, "15:00");                              // 14:20 now: from 15:00
+  assert.ok(hours.slice(0, -1).every((row) => row.length <= 4));
+  await r.handle(cb(`hr:${K}:1`));
+  assert.equal(buttons(lastEdit(tg)[3]).length, 24 + 1);
+  await r.handle(cb(`hr:${K}:1:15`));
+  const text = lastEdit(tg)[2];
+  assert.match(text, /Київ · завтра, 15:00/);
+  assert.match(text, /Зараз: тривоги немає/);
+  assert.match(text, /Історично<\/b> о 15:00 тривога була у <b>\d+%<\/b>/); // no alert now: the model never beat history
+  assert.match(text, /не сигнал безпеки/);
+});
+
+test("🕐 during an alert: shelter first, never a hint to go out; stale data: no claim about now", async () => {
+  const open = { unit: "Київ", started: LIVE_OK - 40 * MINUTE, ended: null, level: "red", max_level: "red" };
+  let { r, tg } = await hoursSetup({ open });
+  await r.handle(cb(`hr:${K}:0:15`));
+  let text = lastEdit(tg)[2];
+  assert.match(text, /Зараз у районі тривога<\/b> \(червона\)/);
+  assert.match(text, /Будьте в укритті й слухайте офіційні сповіщення/);
+  assert.match(text, /Ймовірність, що о 15:00 буде тривога: <b>\d+%<\/b>/);  // 1 h ahead with an alert on: the model
+  for (const t of [text, ui.hourText("Київ", 0, 15, { clim: 0.01, model: 0.01 }, { on: true, elapsed: 5, level: "yellow" }, LIVE_OK, 180)]) {
+    assert.doesNotMatch(t, /можна виходити|виходьте|безпечно|йдіть гуляти/i);
+    assert.match(t, /Будьте в укритті/);
+  }
+  ({ r, tg } = await hoursSetup({ open, ok: LIVE_OK - 60 * MINUTE }));
+  await r.handle(cb(`hr:${K}:0:15`));
+  text = lastEdit(tg)[2];
+  assert.match(text, /Немає свіжих даних про тривоги зараз \(останнє оновлення о 13:15\)/);
+  assert.doesNotMatch(text, /Зараз: тривоги немає/);
+  assert.match(text, /лише історія/);
+  ({ r, tg } = await hoursSetup({ gapTo: 5 }));
+  await r.handle(cb(`hr:${K}:0:15`));
+  assert.match(lastEdit(tg)[2], /Немає свіжих даних/);
+});
+
+test("🕐 forged or stale hour callbacks change nothing and always get an answer", async () => {
+  const { r, tg, store } = await hoursSetup();
+  const other = `${catalog.units.indexOf("Бучанський район")}`;
+  const before = JSON.stringify(await store.get(1));
+  for (const d of ["hr:99999", "hr:-1", `hr:${other}`, `hr:${other}:1:10`, `hr:${K}:2`, `hr:${K}:1:24`, `hr:${K}:1:-1`, `hr:${K}:1:²`,
+    `hr:${K}:1:1e1`, `hr:${K}:1:15:0`, "hr:abc", `hr:${K}:x:5`, "rc:7", "rc:1:1", `hr:${K}:0:9`]) {
+    const n = tg.calls.length;
+    await r.handle(cb(d));
+    assert.equal(tg.calls.at(-1)[0], "answer", d);
+    assert.ok(!tg.calls.slice(n).some((c) => c[0] === "edit" && /🕐 <b>Київ · /.test(c[2] || "")), d);
+  }
+  assert.equal(tg.calls.at(-1)[2], "Ця година вже минула.");
+  assert.equal(JSON.stringify(await store.get(1)), before);
+  const fresh = setup();                                               // no raion yet
+  await fresh.r.handle(cb(`hr:${K}:1:15`));
+  assert.equal(fresh.tg.calls.at(-1)[2], "Спершу оберіть район: /start");
+});
+
+test("🕐 several raions: pick one first; late evening: today has no hours left", async () => {
+  const { r, tg, store } = await hoursSetup();
+  await store.addUnit(1, "Бучанський район");
+  await r.handle(cb("hr"));
+  assert.deepEqual(buttons(lastEdit(tg)[3]).map((b) => b.text), ["📍 Київ", "📍 Бучанський", "← Назад"]);
+  let t = Date.parse("2026-10-12T20:30:00Z");                           // 23:30 Kyiv
+  r.now = () => new Date((t += 1000));
+  await r.handle(cb(`hr:${K}:0`));
+  assert.match(lastEdit(tg)[2], /годин уже не лишилося/);
+});
+
+test("📜 recent alerts: last five with start, end and duration, today's count, an alert still on", async () => {
+  const { r, tg, store } = await hoursSetup();
+  const day0 = Date.parse("2026-10-11T21:00:00Z");                    // 00:00 Kyiv, 12 Oct
+  const rows = [
+    { unit: "Київ", started: day0 - 3 * 3600000, ended: day0 - 2 * 3600000, level: "yellow", max_level: "yellow" },
+    { unit: "Київ", started: day0 - 30 * MINUTE, ended: day0 + 30 * MINUTE, level: "red", max_level: "red" },  // across midnight
+    { unit: "Київ", started: day0 + 5 * 3600000, ended: day0 + 6 * 3600000 + 15 * MINUTE, level: "red", max_level: "red" },
+    { unit: "Київ", started: day0 + 7 * 3600000, ended: day0 + 7 * 3600000 + 22 * MINUTE, level: "yellow", max_level: "yellow" },
+    { unit: "Київ", started: day0 + 13 * 3600000, ended: null, level: "yellow", max_level: "red" },
+    { unit: "Київ", started: day0 - 50 * 3600000, ended: day0 - 49 * 3600000, level: null, max_level: null },
+  ];
+  await store.saveLive(rows, { last: 10, ok: LIVE_OK, gapTo: 0 });
+  await r.handle(msg("/recent"));
+  const text = tg.calls.at(-1)[2];
+  assert.match(text, /Сьогодні: 4 тривоги, разом 3 год 27 хв/);       // 30 + 75 + 22 + 80 (still on, 13:00 to 14:20)
+  assert.match(text, /🔴 12\.10 13:00 → <b>триває<\/b> · 1 год 20 хв/); // max level red although now yellow
+  assert.match(text, /🔴 12\.10 05:00–06:15 · 1 год 15 хв/);
+  assert.match(text, /🔴 11\.10 23:30–00:30 · 1 год/);
+  assert.equal((text.match(/^[🔴🟡🚨] /gmu) || []).length, 5);          // the oldest of six is not shown
+  assert.match(text, /Це факти, не прогноз/);
+  await r.handle(cb("rc:1"));
+  assert.match(lastEdit(tg)[2], /Останні тривоги/);
+  assert.deepEqual([1, 2, 5, 11, 21, 22, 25, 112].map(ui.alertsWord), ["тривога", "тривоги", "тривог", "тривог", "тривога", "тривоги", "тривог", "тривог"]);
+});
+
+test("ingest: hourly parameters and alert history need the secret, are validated, and send nothing", async () => {
+  const env = { DB: fakeD1(), TELEGRAM_BOT_TOKEN: "x", WEBHOOK_SECRET: "w", INGEST_SECRET: "i".repeat(32) };
+  const post = (body, auth = true) => worker.fetch(new Request("https://x/ingest", { method: "POST", body: JSON.stringify(body),
+    headers: auth ? { Authorization: `Bearer ${env.INGEST_SECRET}` } : {} }), env, { waitUntil: () => assert.fail("no delivery") });
+  const hourly = { kind: "hourly", ...HOURLY.params };
+  assert.equal((await post(hourly, false)).status, 403);
+  assert.equal((await post(hourly)).status, 200);
+  assert.equal((await post(hourly)).status, 200);                        // latest wins, no 409
+  assert.equal((await new Store(env.DB).hourlyParams()).as_of, HOURLY.params.as_of);
+  const u0 = Object.keys(hourly.units)[0], unit = (f) => ({ ...hourly, units: { [u0]: { ...hourly.units[u0], ...f } } });
+  for (const b of [{ ...hourly, as_of: "2026-13-01" }, { ...hourly, step: 5 }, { ...hourly, units: {} }, { ...hourly, units: { evil: hourly.units[u0] } },
+    unit({ clim: [2, ...hourly.units[u0].clim.slice(1)] }), unit({ prof: Array(24).fill(0) }), unit({ clim: hourly.units[u0].clim.slice(1) }),
+    { ...hourly, surv: [...hourly.surv.slice(0, 5), 1, ...hourly.surv.slice(6)] }, { ...hourly, surv: hourly.surv.slice(1) },
+    { ...hourly, gates: { ...hourly.gates, on: hourly.gates.on.map(String) } }, { ...hourly, gates: { buckets: [[0, 1]], on: [true], off: [true] } }]) {
+    assert.equal((await post(b)).status, 400, JSON.stringify(b).slice(0, 120));
+  }
+  const t = Date.parse("2026-10-12T12:00:00Z");
+  const alerts = { kind: "alerts", max_post_id: 5, data_end: t, since: t - 7 * 86400000, alerts: [["Київ", t - 3600000, t - 1800000, "red", "red"], ["Київ", t - 600000, null, "yellow", "red"]] };
+  assert.equal((await post(alerts)).status, 200);
+  for (const b of [{ ...alerts, max_post_id: -1 }, { ...alerts, since: t + 1 }, { ...alerts, alerts: [["evil", t - 1, null, null, null]] },
+    { ...alerts, alerts: [["Київ", t - 1, t - 2, null, null]] }, { ...alerts, alerts: [["Київ", t - 1, null, "green", null]] },
+    { ...alerts, alerts: [["Київ", t + 1, null, null, null]] }, { ...alerts, alerts: [["Київ", 1.5, null, null, null]] }]) {
+    assert.equal((await post(b)).status, 400, JSON.stringify(b).slice(0, 120));
+  }
+});
+
+test("schedule: every 5-minute run scrapes first; a failed scrape does not stop delivery", async () => {
+  const env = { DB: fakeD1(), TELEGRAM_BOT_TOKEN: "x" };
+  const real = globalThis.fetch, urls = [];
+  globalThis.fetch = async (url) => { urls.push(String(url)); return new Response(PAGE); };
+  try { await worker.scheduled({ cron: "*/5 * * * *", scheduledTime: Date.parse("2026-10-12T18:02:00Z") }, env); } finally { globalThis.fetch = real; }
+  assert.deepEqual(urls, ["https://t.me/s/UkraineAlarmSignal"]);
+  const meta = await new Store(env.DB).liveMeta();
+  assert.equal(meta.last, 654224); assert.equal(meta.gapTo, 654204);    // first run: what came before is unknown
+
+  const store = new Store(env.DB), sent = [];
+  await store.addUnit(1, "Київ");
+  await store.saveForecast("evening", "2026-10-13", { rows, banner: "" });
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes("t.me")) return new Response("blocked", { status: 403 });
+    sent.push(JSON.parse(init.body).chat_id); return new Response(JSON.stringify({ ok: true, result: {} }));
+  };
+  try { await worker.scheduled({ cron: "*/5 * * * *", scheduledTime: Date.parse("2026-10-12T17:05:00Z") }, env); } finally { globalThis.fetch = real; }
+  assert.deepEqual(sent, [1]);                                           // 20:05 Kyiv: the forecast still went out
+});
+
+test("new keyboards fit a phone", () => {
+  const index = Object.fromEntries(catalog.units.map((u, i) => [u, i]));
+  for (const b of [ui.hoursUnitKeyboard(["Білоцерківський район", "Київ"], index), ui.hoursDayKeyboard(1, true), ui.hoursKeyboard(1, 1, 0),
+    ui.hourResultKeyboard(1, 0), ui.recentKeyboard(), ui.doneKeyboard(), ui.welcomeBackKeyboard({ active: 1, units: ["Київ"] })]) {
+    for (const row of b.inline_keyboard) {
+      for (const x of row) { assert.ok(x.text.length <= 30, x.text); assert.ok(x.callback_data.length <= 64); }
+      if (row.length === 2) assert.ok(row.every((x) => x.text.length <= 16), row.map((x) => x.text));
+      if (row.length > 2) assert.ok(row.length <= 4 && row.every((x) => x.text.length <= 5), row.map((x) => x.text));
+    }
+  }
+});
+
+test("every screen reached by a button has a way back; ← Назад leads to the menu; removing a raion asks first", async () => {
+  const { r, tg, store } = await hoursSetup();
+  const index = Object.fromEntries(catalog.units.map((u, i) => [u, i]));
+  const s = await store.get(1);
+  const backish = (k) => buttons(k).some((b) => /^← /.test(b.text));
+  const boards = { oblasts: ui.oblastKeyboard(Object.keys(catalog.oblasts)), raions: ui.raionKeyboard(catalog.oblasts["Київська область"], index),
+    search: ui.searchKeyboard(search("Буча"), index), how: ui.howKeyboard(), help: ui.helpKeyboard(), settings: ui.settingsKeyboard(s),
+    units: ui.unitsKeyboard(s.units, index, true), hoursUnit: ui.hoursUnitKeyboard(["Київ", "Бучанський район"], index),
+    hoursDay: ui.hoursDayKeyboard(1, false), hours: ui.hoursKeyboard(1, 1), result: ui.hourResultKeyboard(1, 0), recent: ui.recentKeyboard(),
+    remove: ui.removeConfirm("Київ", 1)[1], ...Object.fromEntries(Object.keys(ui.SCREENS).map((n) => [n, ui.screen(n, s)[1]])) };
+  for (const [name, k] of Object.entries(boards)) assert.ok(backish(k), `${name} has no way back`);
+  await r.handle(cb("home"));
+  assert.match(lastEdit(tg)[2], /Меню/);
+  assert.deepEqual(buttons(lastEdit(tg)[3]).map((b) => b.callback_data), ["now", "hr", "rc", "s:root", "add", "help"]);
+  const fresh = setup();
+  await fresh.r.handle(cb("home"));
+  assert.match(lastEdit(fresh.tg)[2], /Шкільний ранок/);                // no raion yet: the welcome screen
+  await r.handle(cb("add"));
+  assert.equal(buttons(lastEdit(tg)[3]).at(-1).callback_data, "s:units"); // adding from settings goes back to settings
+  await r.handle(cb(`rm:${K}`));
+  assert.match(lastEdit(tg)[2], /Прибрати <b>Київ<\/b>/);
+  assert.deepEqual((await store.get(1)).units, ["Київ"]);                 // nothing removed by one tap
+  await r.handle(cb(`rmy:${catalog.units.indexOf("Бучанський район")}`)); // not followed: refused
+  assert.deepEqual((await store.get(1)).units, ["Київ"]);
+  await r.handle(cb(`rmy:${K}`));
+  assert.deepEqual((await store.get(1)).units, []);
+  for (const d of ["home:1", "rmy:abc", "rm:99999"]) { await r.handle(cb(d)); assert.equal(tg.calls.at(-1)[0], "answer"); }
 });
