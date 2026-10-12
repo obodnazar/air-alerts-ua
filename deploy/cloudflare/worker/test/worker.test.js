@@ -148,3 +148,12 @@ test("transport retries 429 and never puts the token into an error", async () =>
   const bad = async () => new Response("{}", { status: 500 });
   await assert.rejects(new Telegram("SECRET123", bad).send(1, "hi"), (e) => !String(e.message).includes("SECRET123"));
 });
+
+test("default fetch is called unbound (Workers throw 'Illegal invocation' otherwise)", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = function (...a) {
+    if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation");
+    return Promise.resolve(new Response(JSON.stringify({ ok: true, result: { ok: 1 } })));
+  };
+  try { assert.deepEqual(await new Telegram("t").call("getMe", {}), { ok: 1 }); } finally { globalThis.fetch = real; }
+});

@@ -64,7 +64,7 @@ export default {
       }
       const update = await request.json().catch(() => null);
       if (update) {
-        const router = new Router(new Store(env.DB), catalog, new Telegram(env.TELEGRAM_BOT_TOKEN));
+        const router = new Router(new Store(env.DB), catalog, new Telegram(String(env.TELEGRAM_BOT_TOKEN || "").trim()));
         try { await router.handle(update); } catch (e) { console.log("handler error", e.message); }
       }
       return new Response("ok"); // always 200, so Telegram does not re-deliver the same update forever
@@ -83,19 +83,24 @@ export default {
       // the Worker registers its own webhook with its own token: the token never leaves Cloudflare
       const auth = (request.headers.get("Authorization") || "").replace(/^Bearer /, "");
       if (!constantTimeEqual(auth, env.INGEST_SECRET)) return new Response("forbidden", { status: 403 });
-      const tg = new Telegram(env.TELEGRAM_BOT_TOKEN);
-      await tg.call("setWebhook", { url: `${url.origin}/telegram`, secret_token: env.WEBHOOK_SECRET,
-        allowed_updates: ["message", "callback_query"], drop_pending_updates: false });
-      await tg.call("setMyCommands", { commands: COMMANDS });
-      const info = await tg.call("getWebhookInfo", {});
-      return Response.json({ ok: true, webhook: info.url, pending: info.pending_update_count });
+      try {
+        const tg = new Telegram(String(env.TELEGRAM_BOT_TOKEN || "").trim());
+        const me = await tg.call("getMe", {});
+        await tg.call("setWebhook", { url: `${url.origin}/telegram`, secret_token: env.WEBHOOK_SECRET,
+          allowed_updates: ["message", "callback_query"], drop_pending_updates: false });
+        await tg.call("setMyCommands", { commands: COMMANDS });
+        const info = await tg.call("getWebhookInfo", {});
+        return Response.json({ ok: true, bot: me.username, webhook: info.url, pending: info.pending_update_count });
+      } catch (e) {
+        return Response.json({ ok: false, error: e.message }, { status: 502 }); // messages never contain the token
+      }
     }
     if (url.pathname === "/health") return new Response("ok");
     return new Response("not found", { status: 404 });
   },
 
   async scheduled(event, env, ctx) {
-    const store = new Store(env.DB), tg = new Telegram(env.TELEGRAM_BOT_TOKEN);
+    const store = new Store(env.DB), tg = new Telegram(String(env.TELEGRAM_BOT_TOKEN || "").trim());
     for (const slot of dueSlots(new Date(event.scheduledTime))) {
       const r = await deliver(store, tg, slot);
       if (r.sent || !r.done) console.log(JSON.stringify({ ...slot, ...r }));

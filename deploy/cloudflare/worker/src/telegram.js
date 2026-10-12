@@ -2,7 +2,8 @@
 export class Blocked extends Error {}
 
 export class Telegram {
-  constructor(token, fetchFn = fetch, api = "https://api.telegram.org") {
+  // the arrow wrapper matters: calling the global fetch as this.fetch(...) throws "Illegal invocation" on Workers
+  constructor(token, fetchFn = (...a) => fetch(...a), api = "https://api.telegram.org") {
     this.base = `${api}/bot${token}`; this.fetch = fetchFn;
   }
   async call(method, params) {
@@ -15,7 +16,7 @@ export class Telegram {
       if (res.status === 429) { await new Promise((r) => setTimeout(r, 1000 * Math.min(5, body?.parameters?.retry_after ?? 1))); continue; }
       if (res.status === 403) throw new Blocked(body.description || "forbidden");
       if (res.status === 400 && /not modified/.test(body.description || "")) return null;
-      throw new Error(`${method}: ${res.status}`); // never include the URL: it contains the token
+      throw new Error(`${method}: ${res.status} ${String(body.description || "").slice(0, 120)}`); // never the URL: it holds the token
     }
     throw new Error(`${method}: rate limited`);
   }
