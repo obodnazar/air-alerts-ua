@@ -29,7 +29,8 @@ APOSTROPHES = str.maketrans({"ʼ": "'", "’": "'", "`": "'"})
 UNIT_RE = re.compile(r"^(?:•\s*)?(?P<name>[^()\n•]+?)\s*(?:\((?P<oblast>[^)]+?)\s*обл\.\))?\s*$")
 LEVEL_RANK = {None: 0, "yellow": 1, "red": 2}
 HEADERS = {"відбій тривоги", "червоний рівень тривоги", "жовтий рівень тривоги", "повітряна тривога",
-           "відбій червоної тривоги, жовта тривога ще триває"}
+           "відбій червоної тривоги", "відбій червоної тривоги, жовта тривога ще триває"}
+SECTION = re.compile(r"\n\s*\n")
 
 
 def norm(name: str) -> str:
@@ -112,15 +113,16 @@ def to_events(posts: pd.DataFrame) -> pd.DataFrame:
     """One row per (post, unit): published_at, unit, oblast, unit_type, kind, level."""
     recs = []
     for p in posts.itertuples():
-        kind, level = classify(p.text)
-        if kind == "ignore":
-            continue
-        for name, oblast in units_in(p.text):
-            recs.append(
-                dict(post_id=p.id, published_at=p.published_at, unit=name, oblast=oblast,
-                     unit_type=unit_type(name), kind=kind, level=level, edited=p.edited)
-            )
-    return pd.DataFrame(recs)
+        # one post can hold several sections, each with its own header ("🟡 Жовтий рівень … / 🟢 Відбій …");
+        # the first version classified the whole post once and turned such starts into all-clears (audit, 12 Oct)
+        for section in (x for x in SECTION.split(p.text) if x.strip()):
+            kind, level = classify(section)
+            if kind == "ignore":
+                continue
+            for name, oblast in units_in(section):
+                recs.append(dict(post_id=p.id, published_at=p.published_at, unit=name, oblast=oblast,
+                                 unit_type=unit_type(name), kind=kind, level=level, edited=p.edited))
+    return pd.DataFrame(recs, columns=["post_id", "published_at", "unit", "oblast", "unit_type", "kind", "level", "edited"])
 
 
 def to_episodes(events: pd.DataFrame, coverage_end: pd.Timestamp) -> pd.DataFrame:
@@ -147,7 +149,9 @@ def to_episodes(events: pd.DataFrame, coverage_end: pd.Timestamp) -> pd.DataFram
             del open_[key]
     for key, cur in open_.items():
         out.append(_close(key, cur, coverage_end, censored=True, unit_type_=unit_type(key[0])))
-    return pd.DataFrame(out).sort_values("started_at").reset_index(drop=True)
+    cols = ["unit", "oblast", "unit_type", "started_at", "finished_at", "start_level", "max_level", "n_level_changes",
+            "levels", "censored", "source"]
+    return pd.DataFrame(out, columns=cols).sort_values("started_at").reset_index(drop=True)
 
 
 def _close(key, cur: Open, end, censored: bool, unit_type_: str) -> dict:

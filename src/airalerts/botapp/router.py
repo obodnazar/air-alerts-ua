@@ -14,7 +14,8 @@ import pandas as pd
 from . import catalog, ui
 from .store import MAX_UNITS
 
-RATE = (8, 10.0)  # at most 8 actions per chat per 10 s; extra ones are dropped silently
+RATE = (8, 10.0)          # at most 8 actions per chat per 10 s; extra ones are dropped silently
+GLOBAL = (25, 1.0)        # and at most 25 actions per second across all chats (Telegram allows ~30/s)
 
 
 class Router:
@@ -25,14 +26,24 @@ class Router:
         self.units = cat["units"]
         self.index = {u: i for i, u in enumerate(self.units)}
         self.hits = defaultdict(deque)
+        self.all_hits = deque()
 
     def _allowed(self, chat) -> bool:
-        q, now = self.hits[chat], self.clock()
+        now = self.clock()
+        while self.all_hits and now - self.all_hits[0] > GLOBAL[1]:
+            self.all_hits.popleft()
+        if len(self.all_hits) >= GLOBAL[0]:
+            return False
+        if len(self.hits) > 10_000:  # forget idle chats so the table cannot grow without bound
+            for c in [c for c, q in self.hits.items() if not q or now - q[-1] > RATE[1]]:
+                del self.hits[c]
+        q = self.hits[chat]
         while q and now - q[0] > RATE[1]:
             q.popleft()
         if len(q) >= RATE[0]:
             return False
         q.append(now)
+        self.all_hits.append(now)
         return True
 
     def handle(self, update: dict) -> None:
@@ -76,25 +87,27 @@ class Router:
             self.tg.send(chat, ui.HELP)
 
     def _unit(self, val: str) -> str | None:
-        try:
-            i = int(val)
-        except ValueError:
-            return None
-        return self.units[i] if 0 <= i < len(self.units) else None
+        i = _int(val)
+        return self.units[i] if i is not None and 0 <= i < len(self.units) else None
 
     def _settings(self, chat, mid):
         sub = self.store.get(chat)
         self.tg.edit(chat, mid, ui.settings_text(sub), ui.settings_keyboard(sub))
 
     def _callback(self, q: dict) -> None:
+        try:
+            note = self._dispatch(q)
+        except Exception:  # never leave the user's button spinning
+            note = "Щось пішло не так, спробуйте /start."
+        self.tg.answer(q["id"], note)
+
+    def _dispatch(self, q: dict) -> str | None:
         chat, mid, data = q["message"]["chat"]["id"], q["message"]["message_id"], str(q.get("data", ""))[:64]
         kind, _, val = data.partition(":")
         note = None
         if kind == "ob":
-            try:
-                oblast = self.oblasts[int(val)] if 0 <= int(val) < len(self.oblasts) else None
-            except ValueError:
-                oblast = None
+            i = _int(val)
+            oblast = self.oblasts[i] if i is not None and 0 <= i < len(self.oblasts) else None
             if oblast:
                 self.tg.edit(chat, mid, f"{oblast}: оберіть район", ui.raion_keyboard(self.cat["oblasts"][oblast], self.index))
         elif kind in ("back", "add"):
@@ -106,7 +119,7 @@ class Router:
                                         f"Контрольна точка школи: {sub['cp']:02d}:00. Налаштування: /settings · прогноз зараз: /now")
             else:
                 note = f"Можна стежити щонайбільше за {MAX_UNITS} районами. Приберіть один у /settings."
-        elif kind == "rm" and (unit := self._unit(val)):
+        elif kind == "rm" and (unit := self._unit(val)) and self.store.get(chat):
             self.store.remove_unit(chat, unit)
             sub = self.store.get(chat)
             self.tg.edit(chat, mid, "🏫 Мої райони", ui.units_keyboard(sub["units"], self.index, len(sub["units"]) < MAX_UNITS))
@@ -121,8 +134,13 @@ class Router:
         elif kind in ("cp", "ev", "st", "m", "bn", "set") and self.store.get(chat):
             field = {"cp": "cp", "ev": "evening", "st": "style", "m": "morning", "bn": "banner"}.get(kind)
             if field:
-                value = int(val) if field in ("cp", "banner") and val.isdigit() else val
+                value = _int(val) if field in ("cp", "banner") else val
                 if not self.store.set(chat, field, value):
                     note = "Невідоме значення."
             self._settings(chat, mid)
-        self.tg.answer(q["id"], note)
+        return note
+
+
+def _int(val: str) -> int | None:
+    """Strict ASCII integer: "²".isdigit() is True but int("²") fails (audit, 12 Oct)."""
+    return int(val) if val.isascii() and val.lstrip("-").isdigit() else None

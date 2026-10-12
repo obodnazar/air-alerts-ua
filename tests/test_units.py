@@ -95,3 +95,61 @@ def test_occupied_rule_from_map_matches_hand_list():
                            "Бериславський район", "Запорізький район", "Куп'янський район"}
     from_map = set(occ[(occ.occupied_share > 0.5) & occ.unit.isin(zoned_oblast_raions)].unit)
     assert from_map == OCCUPIED
+
+
+# ---------- regressions from the 12 Oct audit ----------
+
+def test_post_with_two_sections_real_615287():
+    from airalerts.parse_signal import to_events
+    text = ("🟡 Відбій червоної тривоги\nСумський район (Сумська обл.)\n\n"
+            "🟢 Відбій тривоги\nСумський район (Сумська обл.)\nШосткинський район (Сумська обл.)")
+    ev = to_events(posts((0, text)))
+    assert ev[["unit", "kind"]].values.tolist() == [["Сумський район", "downgrade"], ["Сумський район", "end"],
+                                                     ["Шосткинський район", "end"]]
+
+
+def test_start_and_end_sections_in_one_post():
+    from airalerts.parse_signal import to_events
+    ev = to_events(posts((0, "🟡 Жовтий рівень тривоги\nЛубенський район (Полтавська обл.)\n\n🟢 Відбій тривоги\nКиїв")))
+    assert dict(zip(ev.unit, ev.kind)) == {"Лубенський район": "start", "Київ": "end"}
+
+
+def test_empty_episodes_have_schema():
+    from airalerts.parse_signal import to_events
+    ev = to_events(posts((0, "🟢 Відбій тривоги\n• Київ")))
+    ep = to_episodes(ev, coverage_end=T0)
+    assert ep.empty and "started_at" in ep.columns
+
+
+def test_alert_starting_40s_after_issue_is_not_seen():
+    from airalerts.data import Store, _mins
+    s = pd.Series([pd.Timestamp("2026-09-10 04:00:40", tz="UTC")])
+    e = pd.Series([pd.Timestamp("2026-09-10 05:00:00", tz="UTC")])
+    st = Store({"A": _mins(s)}, {"A": _mins(e)}, {"A": "X"}, (T0, T0), None)
+    assert st.active_until("A", pd.Timestamp("2026-09-10 04:00:00", tz="UTC")) is None
+    assert st.active_until("A", pd.Timestamp("2026-09-10 04:00:41", tz="UTC")) is not None
+
+
+def test_censored_rows_are_not_counted_as_cleared():
+    from airalerts.dataset import clear_label
+    df = pd.DataFrame(dict(remaining=[96.0, 96.0, 96.0, 300.0], event=[True, False, False, False],
+                           capped=[False, True, False, False]))
+    assert clear_label(df, 120).tolist() == [True, False, None, False] or \
+        [None if pd.isna(x) else x for x in clear_label(df, 120)] == [True, False, None, False]
+
+
+def test_alert_across_source_switch_survives(tmp_path):
+    from airalerts import data as D
+    sw = pd.Timestamp("2026-08-27 21:00", tz="UTC")
+    off = pd.DataFrame(dict(oblast=["м. Київ"], raion=[None], hromada=[None], level=["oblast"],
+                            started_at=["2026-08-27 21:00:10+00:00"], finished_at=["2026-08-27 23:00:00+00:00"],
+                            source=["official"]))
+    off.to_csv(tmp_path / "off.csv", index=False)
+    tg = pd.DataFrame(dict(unit=["Київ"], oblast=["м. Київ"], unit_type=["kyiv"],
+                           started_at=[pd.Timestamp("2026-08-27 20:59:50", tz="UTC")],
+                           finished_at=[pd.Timestamp("2026-08-27 23:00:00", tz="UTC")], start_level=[None], max_level=[None],
+                           n_level_changes=[0], levels=["[]"], censored=[False], source=["telegram"]))
+    tg = pd.concat([tg.assign(started_at=pd.Timestamp("2026-08-20", tz="UTC"), finished_at=pd.Timestamp("2026-08-20 01:00", tz="UTC")), tg])
+    tg.to_parquet(tmp_path / "tg.parquet")
+    st = D.build_store(tmp_path / "off.csv", tmp_path / "tg.parquet", switch=sw)
+    assert st.active_until("Київ", pd.Timestamp("2026-08-27 22:00", tz="UTC")) is not None

@@ -50,8 +50,8 @@ def _rates(hist: pd.DataFrame) -> tuple[float, dict, dict]:
 
 def _features(df: pd.DataFrame, rates, with_08: bool) -> pd.DataFrame:
     p0, p_ob, p_ra = rates
-    ob = df.oblast.map(p_ob).fillna(p0)
-    ra = df.unit.map(p_ra).fillna(ob)
+    ob = df.oblast.map(p_ob).fillna(p0).clip(0.01, 0.99)
+    ra = df.unit.map(p_ra).fillna(ob).clip(0.01, 0.99)
     X = pd.DataFrame(dict(raion_rate=np.log(ra / (1 - ra)), oblast_rate=np.log(ob / (1 - ob))), index=df.index)
     if with_08:
         X["red"] = (df.level == "red").astype(float)
@@ -64,7 +64,8 @@ def _features(df: pd.DataFrame, rates, with_08: bool) -> pd.DataFrame:
 
 def fit_predict(hist: pd.DataFrame, target: pd.DataFrame, with_08: bool, horizon: float = 120) -> np.ndarray:
     """P(all-clear within `horizon` minutes after 08:00); 120 = control point 10:00."""
-    hist = hist[hist.event | (hist.remaining > horizon)].assign(clear_by_10=lambda x: x.remaining <= horizon)
+    known = hist.event | hist.capped | (hist.remaining > horizon)
+    hist = hist[known].assign(clear_by_10=lambda x: x.event & (x.remaining <= horizon))
     rates = _rates(hist)
     # rates are computed on the same window they are fitted on; to avoid the model trusting
     # in-sample rates too much, the raion/oblast columns for fitting come from a leave-one-day-out pass
@@ -86,7 +87,7 @@ def rolling_eval(rows: pd.DataFrame) -> pd.DataFrame:
     days = sorted(rows[(rows.day >= EVAL_FROM) & (rows.day <= EVAL_TO) & (rows.day.dt.weekday < 5)].day.unique())
     for d in days:
         hist = rows[(rows.day < d) & (rows.day >= d - pd.Timedelta(days=WINDOW))]
-        today = rows[(rows.day == d) & (rows.event | (rows.remaining > 120))]
+        today = rows[(rows.day == d) & rows.clear_by_10.notna()]
         if today.empty or len(hist) < 100:
             continue
         ob_km = {o: km_rate(g) for o, g in hist.groupby("oblast") if len(g) >= 15}

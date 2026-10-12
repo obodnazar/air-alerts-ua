@@ -35,6 +35,7 @@ def load_tables(store, reports, units, threats=None):
     for k, (a, b) in WIN.items():
         m1 = build_m1(store, reports, a, b, threats=threats)
         m2 = build_m2(store, reports, a, b, threats=threats)
+        m2 = m2[m2.clear_by_10.notna()]  # outcome unknown (censored before 10:00): not scored
         t[k] = (m1[m1.unit.isin(units)].reset_index(drop=True), m2[m2.unit.isin(units)].reset_index(drop=True))
         print(f"{k}: M1 rows {len(t[k][0])} (alert@08 {t[k][0].y.mean():.3f}), M2 rows {len(t[k][1])}")
     return t
@@ -63,8 +64,8 @@ def main() -> None:
     reports = load_reports(Path("data/raw/kaggle/missile_attacks_daily.csv"))
     units = eligible_units(store)
     print(f"eligible units: {len(units)}")
-    af = Path("data/raw/telegram/kpszsu.jsonl")
-    threats = ThreatIndex(load_threat_posts(af)) if af.exists() else None
+    af = load_threat_posts(Path("data/raw/telegram/kpszsu.jsonl"))  # raw posts, or the committed snapshot
+    threats = ThreatIndex(af) if len(af) else None
     print("Air Force threat posts:", "loaded" if threats else "not available")
     T = load_tables(store, reports, units, threats)
     summary = dict(units=len(units), windows=WIN)
@@ -79,7 +80,10 @@ def main() -> None:
             tab.to_csv(RES / f"val_m1_{issue.replace(':', '')}_{name}.csv")
             print(f"\nVAL M1 issue {issue} [{name}]\n", tab.round(4).to_string())
         ev = T["val"][0][T["val"][0].issue == issue]
-        keep, gain, se = M.keep_extra(ev.y, res["base"][2].logit, res["base+extra"][2].logit, ev.day)
+        if threats is None:  # Air Force posts not downloaded: the extras cannot be judged, keep the registered base set
+            keep, gain, se = False, float("nan"), float("nan")
+        else:
+            keep, gain, se = M.keep_extra(ev.y, res["base"][2].logit, res["base+extra"][2].logit, ev.day)
         best = "base+extra" if keep else "base"
         feats1[issue] = res[best][1]
         summary[f"m1_features_{issue}"] = dict(chosen=best, brier_gain=gain, se=se)
@@ -87,11 +91,14 @@ def main() -> None:
     for name, f in (("base", M.M2_FEATURES), ("base+extra", M.M2_FEATURES + M.EXTRA)):
         fits2[name] = M.fit_m2(T["train"][1], features=f)
         preds2[name] = M.predict_m2(fits2[name], T["val"][1])
-        tab2 = M.table(T["val"][1].clear_by_10, preds2[name], "km_pooled")
+        tab2 = M.table(T["val"][1].clear_by_10.astype(bool), preds2[name], "km_pooled")
         tab2.to_csv(RES / f"val_m2_{name}.csv")
         print(f"\nVAL M2 (all-clear by 10:00) [{name}]\n", tab2.round(4).to_string())
-    keep, gain, se = M.keep_extra(T["val"][1].clear_by_10, preds2["base"].logit, preds2["base+extra"].logit,
-                                  T["val"][1].day)
+    if threats is None:
+        keep, gain, se = False, float("nan"), float("nan")
+    else:
+        keep, gain, se = M.keep_extra(T["val"][1].clear_by_10.astype(bool), preds2["base"].logit,
+                                      preds2["base+extra"].logit, T["val"][1].day)
     best2 = "base+extra" if keep else "base"
     feats2, m2fit = fits2[best2]["features"], fits2[best2]
     summary["m2_features"] = dict(chosen=best2, brier_gain=gain, se=se)
@@ -140,8 +147,8 @@ def main() -> None:
     m2fit_tv = M.fit_m2(trval2, features=feats2)
     ev2 = T["test"][1]
     pr2 = M.predict_m2(m2fit_tv, ev2)
-    tab2 = M.table(ev2.clear_by_10, pr2, "km_pooled")
-    boot2 = {m: M.block_bootstrap_diff(ev2.clear_by_10, pr2[m], pr2["km_pooled"], ev2.day) for m in ("logit", "weibull_aft")}
+    tab2 = M.table(ev2.clear_by_10.astype(bool), pr2, "km_pooled")
+    boot2 = {m: M.block_bootstrap_diff(ev2.clear_by_10.astype(bool), pr2[m], pr2["km_pooled"], ev2.day) for m in ("logit", "weibull_aft")}
     tab2.to_csv(RES / "test_m2.csv")
     summary["test"]["m2"] = dict(table=tab2.round(4).to_dict(), c_index_aft=M.c_index(ev2, pr2.aft_median),
                                  bss_vs_km_ci={m: [round(x, 4) for x in v] for m, v in boot2.items()})
@@ -171,7 +178,8 @@ def decision_days(hist_m1, m1, m2, m2fit, features=M.M1_FEATURES, only_outcomes=
     """Per (unit, day): alert at 08:00, all-clear hour, P(remote day) at 20:00, P(clear by 10) at 08:00.
     The 20:00 model is fitted on hist_m1 only (data before the evaluated window)."""
     d = m1[m1.issue == "20:00"][["unit", "oblast", "day", "y"]].rename(columns={"y": "alert"}).copy()
-    clear = (m2.set_index(["unit", "day"]).remaining / 60 + 8).to_dict()
+    # a capped (24 h+) alert never cleared that morning; censored rows were dropped upstream
+    clear = (m2.set_index(["unit", "day"]).pipe(lambda x: x.remaining.where(~x.capped, 24 * 60)) / 60 + 8).to_dict()
     d["clear_h"] = [clear.get((u, x), np.nan) for u, x in zip(d.unit, d.day)]
     if only_outcomes:
         return d.reset_index(drop=True)

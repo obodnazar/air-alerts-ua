@@ -130,12 +130,13 @@ def build_m2(store: Store, reports: pd.DataFrame, start: str, end: str, all_days
                 continue
             s = store.starts[u]
             i = np.searchsorted(s, m, side="right") - 1
-            elapsed = m - int(s[i])
+            elapsed = m - float(s[i])
             obl = [v is not None for k, v in state.items() if store.oblast_of[k] == store.oblast_of[u]]
-            censored = chain_end >= cov_end or (chain_end - int(s[i])) >= 24 * 60
+            capped = (chain_end - float(s[i])) >= 24 * 60  # stuck alert cut at 24 h: it really went on longer
+            censored = chain_end >= cov_end or capped
             rows.append(dict(
                 unit=u, oblast=store.oblast_of[u], day=d, issue_time=T, level=level_of(u, T),
-                remaining=float(min(chain_end, cov_end) - m), event=not censored,
+                remaining=float(min(chain_end, cov_end) - m), event=not censored, capped=capped,
                 elapsed=float(elapsed),
                 night_min=store.minutes_in(u, kyiv(d, "00:00"), T),
                 unit_min_7d=store.minutes_in(u, T - pd.Timedelta(days=7), T),
@@ -144,10 +145,21 @@ def build_m2(store: Store, reports: pd.DataFrame, start: str, end: str, all_days
                 country_6h=country_6h, **threat_counts(threats, store.oblast_of[u], T),
                 available_at=T,
             ))
-    df = pd.DataFrame(rows)
-    df["clear_by_10"] = df.remaining <= 120
-    df["clear_by_11"] = df.remaining <= 180
+    cols = ["unit", "oblast", "day", "issue_time", "level", "remaining", "event", "capped", "elapsed", "night_min",
+            "unit_min_7d", "oblast_share_now", "country_share_now", "dow", "days_since_mass", "drones_7d", "country_6h",
+            "af_oblast_1h", "af_oblast_3h", "af_all_3h", "available_at"]
+    df = pd.DataFrame(rows, columns=cols)
+    for name, h in (("clear_by_10", 120), ("clear_by_11", 180)):
+        df[name] = clear_label(df, h)
     return df
+
+
+def clear_label(df: pd.DataFrame, horizon: float) -> pd.Series:
+    """True/False if the all-clear within `horizon` minutes is known, NaN if not.
+    Censored rows were once counted as cleared (audit, 12 Oct): a capped (24 h+) alert did not clear;
+    an alert still running when the data end is unknown unless it already outlasted the horizon."""
+    known = df.event | df.capped | (df.remaining > horizon)
+    return (df.event & (df.remaining <= horizon)).astype(object).where(known, np.nan)
 
 
 def neighbour_features(store: Store, neighbours: dict | None, u: str, state_now: pd.Series, T: pd.Timestamp) -> dict:

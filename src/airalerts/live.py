@@ -26,6 +26,7 @@ from .dataset import kyiv
 LIVE = Path("results/live")
 MAIN = Path("data/raw/telegram/UkraineAlarmSignal.jsonl")
 TOPUP = Path("data/raw/telegram/UkraineAlarmSignal_live.jsonl")
+STAMP = Path("data/interim/last_refresh")
 
 
 def refresh() -> None:
@@ -36,6 +37,8 @@ def refresh() -> None:
     py = sys.executable
     subprocess.run([py, "-m", "airalerts.sources.telegram", "UkraineAlarmSignal", "--update", "--out", str(TOPUP)], check=True)
     subprocess.run([py, "-m", "airalerts.parse_signal"], check=True)
+    subprocess.run([py, "-m", "airalerts.sources.kaggle"], check=False)  # best effort: last known reports stay
+    STAMP.write_text(pd.Timestamp.now(tz="UTC").isoformat(), encoding="utf-8")  # proof the data reach "now"
 
 
 def forecast(day: str, issue: str) -> None:

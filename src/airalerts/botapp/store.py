@@ -24,7 +24,9 @@ class Store:
     def __init__(self, path: Path | str = DB):
         if str(path) != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(str(path))
+        # autocommit: every statement is its own transaction, so no early return can leave a write lock open
+        # (the first version locked the database for the worker thread; audit, 12 Oct)
+        self.db = sqlite3.connect(str(path), isolation_level=None, timeout=30)
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS subs (chat_id INTEGER PRIMARY KEY, unit TEXT, cp INTEGER DEFAULT 10,
                 morning TEXT DEFAULT 'alert', active INTEGER DEFAULT 1);
@@ -46,6 +48,7 @@ class Store:
         self.db.execute("INSERT OR IGNORE INTO subs (chat_id) VALUES (?)", (chat_id,))
         have = self.units(chat_id)
         if unit in have:
+            self.db.execute("UPDATE subs SET active=1 WHERE chat_id=?", (chat_id,))  # re-subscribe after /stop
             return True
         if len(have) >= MAX_UNITS:
             return False
@@ -100,12 +103,12 @@ class Store:
 
     # ----- idempotency and small state -----
     def mark_sent(self, chat_id: int, kind: str, day: str) -> bool:
-        try:
-            self.db.execute("INSERT INTO sent VALUES (?, ?, ?)", (chat_id, kind, day))
-            self.db.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
+        cur = self.db.execute("INSERT OR IGNORE INTO sent VALUES (?, ?, ?)", (chat_id, kind, day))
+        return cur.rowcount == 1
+
+    def unmark_sent(self, chat_id: int, kind: str, day: str) -> None:
+        """A delivery failed for a transient reason: allow a retry."""
+        self.db.execute("DELETE FROM sent WHERE chat_id=? AND kind=? AND day=?", (chat_id, kind, day))
 
     def kv(self, key: str, value: str | None = None) -> str | None:
         if value is None:

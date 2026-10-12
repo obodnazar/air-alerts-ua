@@ -82,8 +82,15 @@ EN2UA = {v: k for k, v in UA2EN.items()}
 SUMMARY = re.compile(r"збито/подавлено|у ніч на|загалом|обстановка")
 
 
+SNAPSHOT = Path("data/snapshot/airforce_threats.parquet")
+
+
 def load_threat_posts(path: Path) -> pd.DataFrame:
-    files = sorted(path.parent.glob(path.stem + "*.jsonl")) or [path]  # parallel range scrapes
+    """(published_at, oblast, post_id) per threat post and oblast mentioned. Falls back to the committed snapshot
+    when the raw posts were not scraped, so a fresh clone reproduces the same features (audit, 12 Oct)."""
+    files = sorted(path.parent.glob(path.stem + "*.jsonl"))
+    if not files:
+        return pd.read_parquet(SNAPSHOT) if SNAPSHOT.exists() else pd.DataFrame(columns=["published_at", "oblast", "post_id"])
     rows = [json.loads(l) for f in files for l in f.open(encoding="utf-8") if l.strip()]
     df = pd.DataFrame(rows).drop_duplicates("id")
     df["published_at"] = pd.to_datetime(df.published_at, utc=True)
@@ -94,15 +101,15 @@ def load_threat_posts(path: Path) -> pd.DataFrame:
         if SUMMARY.search(t) or classify(r.text) is None:
             continue
         for ob in oblasts_in(r.text):
-            recs.append((r.published_at, EN2UA[ob]))
-    out = pd.DataFrame(recs, columns=["published_at", "oblast"]).sort_values("published_at")
-    return out
+            recs.append((r.published_at, EN2UA[ob], r.id))
+    return pd.DataFrame(recs, columns=["published_at", "oblast", "post_id"]).sort_values("published_at")
 
 
 class ThreatIndex:
     def __init__(self, posts: pd.DataFrame):
         m = (posts.published_at.dt.as_unit("ns").astype("int64") // 60_000_000_000).to_numpy()
-        self.all = np.sort(m)
+        # nationwide count = distinct posts, not oblast mentions (a post naming two oblasts counted twice; audit)
+        self.all = np.sort(m[~posts.post_id.duplicated().to_numpy()]) if "post_id" in posts else np.sort(m)
         self.by_oblast = {o: np.sort(m[(posts.oblast == o).to_numpy()]) for o in posts.oblast.unique()}
         self.start = int(m.min()) if len(m) else None
 

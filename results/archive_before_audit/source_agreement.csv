@@ -1,0 +1,7 @@
+window,direction,n,matched_2min,share
+16–28 Aug (official feed healthy),official→telegram,4769,4590,0.962
+16–28 Aug (official feed healthy),telegram→official,4731,4591,0.97
+29 Aug–2 Sep (official outage),official→telegram,319,314,0.984
+29 Aug–2 Sep (official outage),telegram→official,2299,314,0.137
+3–7 Sep (levels introduced),official→telegram,1614,1569,0.972
+3–7 Sep (levels introduced),telegram→official,1639,1567,0.956

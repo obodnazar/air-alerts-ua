@@ -25,6 +25,16 @@ def _world():
     return store, load_reports(Path("data/raw/kaggle/missile_attacks_daily.csv")), eligible_units(store)
 
 
+def _fresh(store, T: pd.Timestamp) -> None:
+    """Refuse to forecast unless the alert feed was refreshed AFTER the issue time: missing data is not
+    'no alert' (audit, 12 Oct). A quiet channel is fine; an old refresh is not."""
+    from ..live import STAMP
+
+    last = pd.Timestamp(STAMP.read_text(encoding="utf-8")) if STAMP.exists() else None
+    if last is None or last < T:
+        raise RuntimeError(f"stale alert data: last refresh {last}, issue time {T}")
+
+
 def _recent(store, reports, keep, d, before):
     r = build_m2(store, reports, (d - pd.Timedelta(days=WINDOW)).strftime("%Y-%m-%d"),
                  (d - pd.Timedelta(days=1)).strftime("%Y-%m-%d"), all_days=True)
@@ -35,6 +45,7 @@ def evening(day: str) -> pd.DataFrame:
     store, reports, keep = _world()
     d = pd.Timestamp(day)
     T = kyiv(d - pd.Timedelta(days=1), "20:00")
+    _fresh(store, T)
     hist = build_m1(store, reports, "2025-12-15", (d - pd.Timedelta(days=2)).strftime("%Y-%m-%d"))
     hist = hist[hist.unit.isin(keep) & (hist.issue == "20:00")]
     now = build_m1(store, reports, day, day)
@@ -53,12 +64,13 @@ def evening(day: str) -> pd.DataFrame:
 def morning(day: str) -> pd.DataFrame:
     store, reports, keep = _world()
     d = pd.Timestamp(day)
+    _fresh(store, kyiv(d, "08:00"))
     recent = _recent(store, reports, keep, d, kyiv(d, "08:00"))
     now = build_m2(store, reports, day, day, all_days=True)
     now = now[now.unit.isin(keep)].reset_index(drop=True)
     out = pd.DataFrame(dict(unit=now.unit, level=now.level, elapsed_min=now.elapsed))
-    for cp in CPS:
-        out[f"p_clear_{cp}"] = fit_predict(recent, now, with_08=True, horizon=(cp - 8) * 60) if len(now) else []
+    for cp in CPS:  # a morning with no alerts anywhere is valid: empty table with the right columns
+        out[f"p_clear_{cp}"] = fit_predict(recent, now, with_08=True, horizon=(cp - 8) * 60) if len(now) else pd.Series(dtype=float)
     CACHE.mkdir(parents=True, exist_ok=True)
     out.to_csv(CACHE / f"bot_morning_{day}.csv", index=False)
     return out

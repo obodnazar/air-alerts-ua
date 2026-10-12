@@ -24,7 +24,9 @@ KYIV = "Europe/Kyiv"
 COMMANDS = [{"command": "start", "description": "обрати район"}, {"command": "now", "description": "прогноз на завтра"},
             {"command": "settings", "description": "контрольна точка, ранкові повідомлення"},
             {"command": "stop", "description": "відписатися"}, {"command": "help", "description": "як це працює"}]
-PREPARE = {"evening": ("19:45", "21:30"), "morning": ("08:01", "09:30")}
+# prepared only AFTER the issue time (20:00 / 08:00): preparing at 19:45 treated the unknown 19:45-20:00
+# as "no alert" (audit, 12 Oct). Each slot is delivered as soon as the forecast is ready.
+PREPARE = {"evening": ("20:00", "21:30"), "morning": ("08:00", "09:30")}
 SLOTS = {"evening": ("20:00", "20:30", "21:00"), "morning": ("08:05",)}
 LATE = 90  # minutes a slot may still be delivered after its time (bot started late, network hiccup)
 
@@ -65,7 +67,7 @@ def due_slots(kind: str, now: pd.Timestamp, store: Store) -> list[tuple[pd.Times
 def broadcast(kind: str, day: pd.Timestamp, store: Store, tg, frame: pd.DataFrame, banner_text: str,
               slot: str | None = None, pause: float = 0.05) -> int:
     rows = {r["unit"]: r for r in frame.to_dict("records")}
-    sent = 0
+    sent = failed = 0
     for sub in store.active(f"{day:%Y-%m-%d}"):
         if kind == "evening" and slot and sub["evening"] != slot:
             continue
@@ -79,9 +81,11 @@ def broadcast(kind: str, day: pd.Timestamp, store: Store, tg, frame: pd.DataFram
         except Blocked:
             store.set(sub["chat_id"], "active", 0)
         except Exception as e:  # one bad subscriber must never stop the others
+            store.unmark_sent(sub["chat_id"], kind, f"{day:%Y-%m-%d}")  # retried on the next tick (audit, 12 Oct)
+            failed += 1
             print(f"send to one subscriber failed: {type(e).__name__}", flush=True)
         time.sleep(pause)  # stay far below ~30 messages/s
-    if slot:
+    if slot and not failed:
         store.kv(f"done:{kind}:{slot}:{day:%Y-%m-%d}", "1")
     return sent
 

@@ -72,15 +72,18 @@ def km_prob(train: pd.DataFrame, horizon: float) -> float:
 
 def fit_m2(train: pd.DataFrame, horizon: float = 120, features: list[str] | None = None) -> dict:
     feats = features or M2_FEATURES
-    known = train[train.event | (train.remaining > horizon)]  # censored before the horizon: outcome unknown
+    lab = (train.event & (train.remaining <= horizon)).where(train.event | train.capped | (train.remaining > horizon))
+    known = train[lab.notna()]  # censored before the horizon: outcome unknown
     X = known[feats].astype(float).fillna(0)
-    y = (known.remaining <= horizon).astype(int)
+    y = lab[lab.notna()].astype(int)
     logit = make_pipeline(StandardScaler(), LogisticRegression(C=1.0, max_iter=3000)).fit(X, y)
     aft_df = train[feats + ["remaining", "event"]].copy().fillna(0)
     aft_df["remaining"] = aft_df.remaining.clip(lower=1)
     aft = WeibullAFTFitter(penalizer=0.01).fit(aft_df, duration_col="remaining", event_col="event")
-    oblast_km = {o: km_prob(g, horizon) for o, g in train.groupby("oblast") if len(g) >= 30}
-    return dict(logit=logit, aft=aft, pooled_km=km_prob(train, horizon), oblast_km=oblast_km, horizon=horizon,
+    # registered baseline: Kaplan-Meier on the previous 60 days (the first version silently used all training days)
+    last60 = train[train.day > train.day.max() - pd.Timedelta(days=60)]
+    oblast_km = {o: km_prob(g, horizon) for o, g in last60.groupby("oblast") if len(g) >= 30}
+    return dict(logit=logit, aft=aft, pooled_km=km_prob(last60, horizon), oblast_km=oblast_km, horizon=horizon,
                 features=feats)
 
 

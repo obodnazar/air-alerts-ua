@@ -10,10 +10,12 @@ export PYTHONPATH=src
 $PY -m airalerts.sources.vadimkin
 $PY -m airalerts.sources.kaggle
 mkdir -p data/interim && cp data/snapshot/telegram_episodes.parquet data/interim/
+cp results/summary.json /tmp/air-alerts-committed-summary.json
 $PY -m pytest -q -p no:cacheprovider
 $PY -m airalerts.evaluate --test
 $PY -m airalerts.levels
 $PY -m airalerts.cost
 $PY -m airalerts.clearance
 $PY -m airalerts.figures
+$PY scripts/check_results.py /tmp/air-alerts-committed-summary.json
 echo "done: results/ and figures/ regenerated"

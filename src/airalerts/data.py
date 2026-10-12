@@ -26,7 +26,7 @@ REGIME_START = pd.Timestamp("2025-12-15", tz="UTC")  # nationwide raion-level al
 MAX_EPISODE = pd.Timedelta(hours=24)
 # Raions renamed in 2024 (decommunisation law): the official feed keeps old names, Telegram uses new ones.
 RENAMES = {"Красноградський район": "Берестинський район", "Володимир-Волинський район": "Володимирський район",
-           "Червоноградський район": "Шептицький район"}
+           "Червоноградський район": "Шептицький район", "Новомосковський район": "Самарівський район"}
 # Raions wholly or mostly under occupation: their alert series is identical to neighbours' and no schools
 # there follow Ukrainian MoE rules. Since 12 Oct the list comes from the DeepState map (geo.py, >50% of the
 # raion's area occupied on 31 Aug 2026); this hand-made list is kept as a cross-check in the tests. Donetsk oblast is excluded as a whole: it was left out of raion-level
@@ -84,13 +84,13 @@ class Store:
     def units(self) -> list:
         return sorted(self.starts)
 
-    def active_until(self, unit: str, t: pd.Timestamp) -> int | None:
+    def active_until(self, unit: str, t: pd.Timestamp) -> float | None:
         """If the unit is under alert at t, return the end minute of the merged chain."""
         m = _minute(t)
         s, e = self.starts[unit], self.ends[unit]
         i = np.searchsorted(s, m, side="right") - 1
         if i >= 0 and e[i] > m:
-            return int(e[i])
+            return float(e[i])
         return None
 
     def minutes_in(self, unit: str, a: pd.Timestamp, b: pd.Timestamp) -> float:
@@ -98,21 +98,23 @@ class Store:
         s, e = self.starts[unit], self.ends[unit]
         return float(np.clip(np.minimum(e, hi) - np.maximum(s, lo), 0, None).sum())
 
-    def last_end_before(self, unit: str, t: pd.Timestamp) -> int | None:
+    def last_end_before(self, unit: str, t: pd.Timestamp) -> float | None:
         m = _minute(t)
         e = self.ends[unit]
         e = e[e <= m]
-        return int(e.max()) if len(e) else None
+        return float(e.max()) if len(e) else None
 
 
-def _minute(t: pd.Timestamp) -> int:
-    return int(pd.Timestamp(t).tz_convert("UTC").value // 60_000_000_000)
+def _minute(t: pd.Timestamp) -> float:
+    """Minutes since epoch with sub-minute precision. Flooring to whole minutes let an alert that started
+    at 07:00:40 count as active at 07:00:00, i.e. 40 s of future (audit, 12 Oct)."""
+    return pd.Timestamp(t).tz_convert("UTC").value / 60_000_000_000
 
 
 def _mins(series: pd.Series) -> np.ndarray:
     if series.empty:
-        return np.array([], dtype=np.int64)
-    return (series.dt.tz_convert("UTC").dt.as_unit("ns").astype("int64") // 60_000_000_000).to_numpy()
+        return np.array([], dtype=float)
+    return series.dt.tz_convert("UTC").dt.as_unit("ns").astype("int64").to_numpy() / 60_000_000_000
 
 
 def _merge(starts: np.ndarray, ends: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -125,7 +127,7 @@ def _merge(starts: np.ndarray, ends: np.ndarray) -> tuple[np.ndarray, np.ndarray
         else:
             out_s.append(a)
             out_e.append(b)
-    return np.array(out_s, dtype=np.int64), np.array(out_e, dtype=np.int64)
+    return np.array(out_s, dtype=float), np.array(out_e, dtype=float)
 
 
 def build_store(official_csv: Path, telegram_episodes: Path, switch: pd.Timestamp = SWITCH) -> Store:
@@ -136,10 +138,14 @@ def build_store(official_csv: Path, telegram_episodes: Path, switch: pd.Timestam
     tg_end = tg.finished_at.max()
     if tg_start > switch:
         print(f"WARNING: Telegram data starts {tg_start}, after the switch {switch}: gap in coverage")
+    # stitch at the switch by clipping intervals, not by dropping whole episodes: an alert running across the
+    # switch used to vanish from both sources (audit, 12 Oct)
     a = official_unit_alerts(off)
-    a = a[a.started_at < switch]
+    a = a[a.started_at < switch].copy()
+    a["finished_at"] = a.finished_at.clip(upper=switch)
     b = telegram_unit_alerts(tg)
-    b = b[b.started_at >= switch]
+    b = b[b.finished_at > switch].copy()
+    b["started_at"] = b.started_at.clip(lower=switch)
     allr = pd.concat([a, b], ignore_index=True)
     # cap stuck alerts: they are censored at 24h rather than counted as a day-long alert
     long = (allr.finished_at - allr.started_at) > MAX_EPISODE

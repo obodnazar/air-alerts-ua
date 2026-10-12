@@ -63,19 +63,25 @@ def search(query: str, cat: dict, n: int = 6) -> list[tuple[str, str | None]]:
     if len(q) < 3:
         return []
     units = cat["units"]
-    hits = [(u, u) for u in units if norm(u).startswith(q[:5]) or q in norm(u)]
     scored = []
+    for u in units:  # raions compete with towns on the same scale; a 5-letter prefix alone no longer wins
+        k = norm(u)
+        r = difflib.SequenceMatcher(None, q, k).ratio() + (0.1 if k.startswith(q) else 0)
+        if r >= 0.62:
+            scored.append((r + 0.05, u, u))
     for t, u in cat["towns"].items():  # several hromadas can share a stem (міська / сільська): score each
         k = norm(t)
         r = difflib.SequenceMatcher(None, q, k).ratio() + (0.1 if k[:4] == q[:4] else 0) + (0.08 if "міська" in t else 0)
+        r += 0.1 if u and norm(u)[:5] == k[:5] else 0  # the raion's namesake town (Бучанська → Бучанський)
         if r >= 0.62:
             scored.append((r, t, u))
-    for _, t, u in sorted(scored, reverse=True):
+    hits = []
+    for _, label, u in sorted(scored, key=lambda x: -x[0]):
         served = u if u in units else None
         if served and any(h[1] == served for h in hits):
             continue
-        label = f"{t.replace(' територіальна громада', '')} → {served or 'район не обслуговується'}"
-        hits.append((label, served))
+        text = label if label == u else f"{label.replace(' територіальна громада', '')} → {served or 'район не обслуговується'}"
+        hits.append((text, served))
     return hits[:n]
 
 

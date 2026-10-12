@@ -129,8 +129,8 @@ def test_settings_change_and_pause(bot):
 
 # ---------- security ----------
 
-@pytest.mark.parametrize("data", ["cp:99", "cp:abc", "u:99999", "u:-1", "ob:abc", "ob:999", "ev:03:00", "st:evil",
-                                  "m:'; DROP TABLE subs;--", "bn:7", "p:365", "rm:abc", "xx:1", ""])
+@pytest.mark.parametrize("data", ["cp:99", "cp:abc", "cp:²", "bn:²", "u:99999", "u:-1", "u:²", "ob:abc", "ob:999", "ob:-1",
+                                  "ev:03:00", "st:evil", "m:'; DROP TABLE subs;--", "bn:7", "p:365", "rm:abc", "xx:1", ""])
 def test_forged_button_data_is_harmless(bot, data):
     r, _, st, cat, _ = bot
     r.handle(cb(unit_cb(cat, "Київ")))
@@ -139,6 +139,47 @@ def test_forged_button_data_is_harmless(bot, data):
     after = st.get(1)
     assert after == before
     assert st.db.execute("SELECT count(*) FROM subs").fetchone()[0] == 1
+    assert r.tg.calls[-1][0] == "answer"  # the button never stays spinning
+
+
+def test_remove_raion_for_unknown_chat_is_harmless(bot):
+    r, tg, st, cat, _ = bot
+    r.handle(cb("rm:0", chat=777))
+    assert st.get(777) is None and tg.calls[-1][0] == "answer"
+
+
+def test_global_rate_limit(bot):
+    r, tg, _, _, _ = bot
+    for chat in range(100):
+        r.handle(msg("/start", chat=chat))
+    assert sum(1 for c in tg.calls if c[0] == "send") == 25
+
+
+def test_resubscribe_after_stop(bot):
+    r, _, st, cat, clock = bot
+    r.handle(cb(unit_cb(cat, "Київ")))
+    r.handle(msg("/stop"))
+    clock.t += 1
+    r.handle(cb(unit_cb(cat, "Київ")))
+    assert st.get(1)["active"] == 1
+
+
+def test_two_connections_do_not_lock(tmp_path):
+    a, b = Store(tmp_path / "x.sqlite"), Store(tmp_path / "x.sqlite")
+    a.mark_sent(1, "evening", "2026-10-13")
+    a.mark_sent(1, "evening", "2026-10-13")
+    a.add_unit(1, "Київ")
+    a.add_unit(1, "Київ")
+    b.kv("x", "1")  # used to raise "database is locked"
+    assert b.kv("x") == "1"
+
+
+@pytest.mark.parametrize("query,expected", [("Буча", "Бучанський район"), ("Чернігів", "Чернігівський район"),
+                                            ("Кам'янське", "Кам'янський район"), ("Кременчук", "Кременчуцький район"),
+                                            ("Новомосковськ", "Самарівський район"), ("Дніпро", "Дніпровський район"),
+                                            ("Запоріжжя", "Запорізький район"), ("Чернівці", "Чернівецький район")])
+def test_city_ranking(query, expected):
+    assert catalog.search(query, catalog.load())[0][1] == expected
 
 
 def test_rate_limit_drops_spam(bot):
@@ -178,6 +219,10 @@ def test_evening_slots_idempotency_blocked_and_broken():
     assert "до 12:00: 50%" in texts[2]                      # the subscriber's own control point
     assert st.get(3)["active"] == 0                         # blocked user switched off
     assert 5 not in texts                                   # 21:00 subscriber waits for their slot
+    assert not st.kv("done:evening:20:00:2026-10-13")       # a transient failure keeps the slot open
+    tg.broken.clear()                                       # network is back
+    assert broadcast("evening", day, st, tg, frame(), "", slot="20:00", pause=0) == 1  # only the failed one, once
+    assert st.kv("done:evening:20:00:2026-10-13") == "1"
     assert broadcast("evening", day, st, tg, frame(), "", slot="20:00", pause=0) == 0  # nothing twice
     assert broadcast("evening", day, st, tg, frame(), "", slot="21:00", pause=0) == 1
 
@@ -198,8 +243,9 @@ def test_morning_only_alert_unless_always_and_style():
 
 
 @pytest.mark.parametrize("now,kind,expected", [
-    ("2026-10-11 19:50", "evening", "2026-10-12"),  # Sunday evening -> Monday
-    ("2026-10-16 19:50", "evening", None),          # Friday evening -> Saturday: no school
+    ("2026-10-11 19:50", "evening", None),          # before the issue time: the state at 20:00 is not known yet
+    ("2026-10-11 20:01", "evening", "2026-10-12"),  # Sunday evening -> Monday
+    ("2026-10-16 20:01", "evening", None),          # Friday evening -> Saturday: no school
     ("2026-10-12 08:03", "morning", "2026-10-12"),
     ("2026-10-12 12:00", "morning", None),          # outside the window
 ])

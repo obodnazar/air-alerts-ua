@@ -38,7 +38,8 @@ def truncate(store, reports, T):
         s, e = store.starts[u], store.ends[u]
         keep = s <= m
         st.starts[u] = s[keep]
-        st.ends[u] = np.where(e[keep] > m, m + 1, e[keep])  # still running at T: end unknown
+        st.ends[u] = np.where(e[keep] > m, m + 1 / 60, e[keep])  # still running at T: end unknown
+    st.raw = store.raw[store.raw.started_at <= T].assign(finished_at=lambda x: x.finished_at.clip(upper=T + pd.Timedelta(seconds=1)))
     return st, reports[reports.available_at <= T]
 
 
@@ -50,17 +51,49 @@ def test_available_at_never_after_issue(world):
     assert (m2.available_at <= m2.issue_time).all()
 
 
+M1_ALL = FEATURES + ["country_6h"]
+M2_ALL = ["elapsed", "night_min", "unit_min_7d", "oblast_share_now", "country_share_now", "days_since_mass", "drones_7d",
+          "country_6h", "level"]
+
+
+def m1_at(store, reports, day, issue):
+    m = build_m1(store, reports, day, day)
+    return m[m.issue == issue].set_index("unit")[M1_ALL].sort_index()
+
+
+def m2_at(store, reports, day):
+    m = build_m2(store, reports, day, day, all_days=True)
+    return m.set_index("unit")[M2_ALL].sort_index()
+
+
 @pytest.mark.parametrize("day", ["2026-05-13", "2026-08-12", "2026-09-23"])
-def test_features_equal_on_truncated_world(world, day):
+@pytest.mark.parametrize("issue", ["20:00", "07:00", "08:00"])
+def test_features_equal_on_truncated_world(world, day, issue):
+    """Every feature column, at every issue time, from a world cut at that time (audit: the first version
+    checked only the base 20:00 features)."""
     store, reports = world
     d = pd.Timestamp(day)
-    T = kyiv(d - pd.Timedelta(days=1), "20:00")
-    full = build_m1(store, reports, day, day)
-    full = full[full.issue == "20:00"].set_index("unit")[FEATURES]
+    T = kyiv(d - pd.Timedelta(days=1), "20:00") if issue == "20:00" else kyiv(d, issue)
     st, rep = truncate(store, reports, T)
-    cut = build_m1(st, rep, day, day)
-    cut = cut[cut.issue == "20:00"].set_index("unit")[FEATURES]
-    pd.testing.assert_frame_equal(full.sort_index(), cut.sort_index(), check_dtype=False)
+    if issue == "08:00":
+        full, cut = m2_at(store, reports, day), m2_at(st, rep, day)
+    else:
+        full, cut = m1_at(store, reports, day, issue), m1_at(st, rep, day, issue)
+    pd.testing.assert_frame_equal(full, cut, check_dtype=False)
+
+
+def test_truncation_check_catches_a_one_hour_peek(world, monkeypatch):
+    """Mutation test: make 'minutes in the last 6 h' peek one hour ahead; the check must now fail."""
+    from airalerts import data as D
+
+    store, reports = world
+    day, issue = "2026-09-23", "07:00"
+    T = kyiv(pd.Timestamp(day), issue)
+    orig = D.Store.minutes_in
+    monkeypatch.setattr(D.Store, "minutes_in", lambda self, u, a, b: orig(self, u, a, b + pd.Timedelta(hours=1)))
+    st, rep = truncate(store, reports, T)
+    with pytest.raises(AssertionError):
+        pd.testing.assert_frame_equal(m1_at(store, reports, day, issue), m1_at(st, rep, day, issue), check_dtype=False)
 
 
 def test_planted_leak_trips_guard(world):
