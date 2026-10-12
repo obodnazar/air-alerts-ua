@@ -1,6 +1,6 @@
 // Cloudflare Worker entry: Telegram webhook, forecast ingest, and the 5-minute delivery schedule.
 import { Store } from "./store.js";
-import { Telegram, Blocked } from "./telegram.js";
+import { Telegram, Blocked, RateLimited } from "./telegram.js";
 import { Router } from "./router.js";
 import { catalog } from "./catalog.js";
 import * as ui from "./ui.js";
@@ -8,16 +8,49 @@ import { kyivNow, addDays, weekday, plusMinutes } from "./util.js";
 
 const SLOTS = { evening: ["20:00", "20:30", "21:00"], morning: ["08:05"] };
 const LATE = 90;        // minutes a slot may still go out after its time
-const BATCH = 40;       // Workers Free: 50 external subrequests per invocation
+const TG_BUDGET = 40;   // Workers Free: 50 external subrequests per invocation, shared by all slots of one run
+const CLAIM = 200;      // rows claimed per slot and run; those not sent (budget spent) go back to pending
 const COMMANDS = [{ command: "start", description: "обрати район" }, { command: "now", description: "прогноз на завтра" },
   { command: "settings", description: "налаштування" }, { command: "pause", description: "пауза на канікули" },
   { command: "stop", description: "відписатися" }, { command: "help", description: "як це працює" }];
 
-function constantTimeEqual(a, b) {
-  if (!a || !b || a.length !== b.length) return false;
+/** Compare secrets in constant time: hash both (equal length), then XOR every byte. */
+async function sameSecret(given, expected) {
+  if (!given || !expected) return false;
+  const enc = new TextEncoder();
+  const [x, y] = await Promise.all([given, expected].map((v) => crypto.subtle.digest("SHA-256", enc.encode(v))));
+  const a = new Uint8Array(x), b = new Uint8Array(y);
   let d = 0;
-  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  for (let i = 0; i < a.length; i++) d |= a[i] ^ b[i];
   return d === 0;
+}
+/** Strict "Authorization: Bearer <secret>". */
+const bearer = (req) => /^Bearer (\S+)$/.exec(req.headers.get("Authorization") || "")?.[1] || "";
+
+const isDay = (d) => typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(Date.parse(`${d}T00:00:00Z`))
+  && new Date(`${d}T00:00:00Z`).toISOString().slice(0, 10) === d; // rejects 2026-02-30
+const isP = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1;
+const CPS = ["p_clear_9", "p_clear_10", "p_clear_11", "p_clear_12"];
+const FIELDS = { evening: ["p_alert_08", "usual", ...CPS], morning: CPS };
+
+/** The /ingest body, checked field by field; returns an error string or null. Mirrors forecasts.py's tables. */
+export function invalid(body, units = new Set(catalog.units)) {
+  if (!body || typeof body !== "object") return "body";
+  if (!(body.kind in FIELDS)) return "kind";
+  if (!isDay(body.day)) return "day";
+  if (!Array.isArray(body.rows) || body.rows.length > units.size) return "rows";
+  if (body.kind === "evening" && !body.rows.length) return "empty evening forecast"; // a morning with no alerts is valid
+  const seen = new Set();
+  for (const r of body.rows) {
+    if (!r || typeof r !== "object" || !units.has(r.unit) || seen.has(r.unit)) return `unit ${String(r?.unit).slice(0, 40)}`;
+    seen.add(r.unit);
+    for (const f of FIELDS[body.kind]) if (!isP(r[f])) return `${r.unit}: ${f}`;
+    if (body.kind === "morning" && (!["red", "yellow"].includes(r.level) || !(Number.isFinite(r.elapsed_min) && r.elapsed_min >= 0))) {
+      return `${r.unit}: level/elapsed_min`;
+    }
+  }
+  if (body.banner != null && typeof body.banner !== "string") return "banner";
+  return null;
 }
 
 /** Which (kind, day, slot) are due now, given Kyiv local time. Pure, tested. */
@@ -31,35 +64,40 @@ export function dueSlots(now = new Date()) {
   return out;
 }
 
-/** Send one batch for a slot. Marks after success; transient failures are retried on the next tick. */
-export async function deliver(store, tg, { kind, day, slot }, batch = BATCH) {
-  if (await store.kv(`done:${kind}:${slot}:${day}`)) return { sent: 0, done: true };
+/** Deliver one slot from the outbox. `budget.calls` is shared by every slot of the run (Telegram subrequests);
+ *  a 429 stops the whole run. Anything not sent stays pending for the next tick (every 5 minutes). */
+export async function deliver(store, tg, { kind, day, slot }, budget = { calls: TG_BUDGET }, now = Date.now()) {
   const f = await store.forecast(kind, day);
-  if (!f) return { sent: 0, done: false, waiting: true };
-  const rows = Object.fromEntries((f.rows || []).map((r) => [r.unit, r]));
-  let sent = 0, attempts = 0, failed = 0;
-  for (const sub of await store.active(day)) {
-    if (kind === "evening" && sub.evening !== slot) continue;
-    if (attempts >= batch) return { sent, done: false }; // the rest go on the next tick
-    if (!(await store.markSent(sub.chat_id, kind, day))) continue;
+  if (!f) return { sent: 0, waiting: true };
+  await store.plan(kind, day, slot);
+  if (budget.calls <= 0 || budget.stop) return { sent: 0 };
+  const token = crypto.randomUUID();
+  const subs = await store.claim(kind, day, slot, token, now, CLAIM);
+  if (!subs.length) return { sent: 0 };
+  const rows = Object.fromEntries(f.rows.map((r) => [r.unit, r]));
+  const outcome = {};
+  let sent = 0;
+  for (const sub of subs) {
     const text = kind === "evening" ? ui.eveningMessage(sub, rows, day, f.banner) : ui.morningMessage(sub, rows, day, f.banner);
-    if (!text) continue;
-    attempts++;
-    try { await tg.send(sub.chat_id, text); sent++; }
+    if (!text) { outcome[sub.chat_id] = "skipped"; continue; } // e.g. morning without an alert in their raions
+    if (budget.calls <= 0 || budget.stop) continue;           // back to pending
+    budget.calls--;
+    try { await tg.send(sub.chat_id, text); outcome[sub.chat_id] = "sent"; sent++; }
     catch (e) {
-      if (e instanceof Blocked) await store.set(sub.chat_id, "active", 0);
-      else { await store.unmarkSent(sub.chat_id, kind, day); failed++; }
+      if (e instanceof Blocked) outcome[sub.chat_id] = "blocked";
+      else if (e instanceof RateLimited) budget.stop = true;  // Telegram asks us to slow down: stop the run
+      // network or 5xx: stays pending, retried on the next tick
     }
   }
-  if (!failed) await store.kv(`done:${kind}:${slot}:${day}`, "1");
-  return { sent, done: !failed };
+  await store.finish(token, outcome);
+  return { sent, claimed: subs.length };
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/telegram") {
-      if (!constantTimeEqual(request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "", env.WEBHOOK_SECRET)) {
+      if (!(await sameSecret(request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "", env.WEBHOOK_SECRET))) {
         return new Response("forbidden", { status: 403 });
       }
       const update = await request.json().catch(() => null);
@@ -70,21 +108,24 @@ export default {
       return new Response("ok"); // always 200, so Telegram does not re-deliver the same update forever
     }
     if (request.method === "POST" && url.pathname === "/ingest") {
-      const auth = (request.headers.get("Authorization") || "").replace(/^Bearer /, "");
-      if (!constantTimeEqual(auth, env.INGEST_SECRET)) return new Response("forbidden", { status: 403 });
+      if (!(await sameSecret(bearer(request), env.INGEST_SECRET))) return new Response("forbidden", { status: 403 });
       const body = await request.json().catch(() => null);
-      if (!body || !["evening", "morning"].includes(body.kind) || !/^\d{4}-\d{2}-\d{2}$/.test(body.day) || !Array.isArray(body.rows)) {
-        return new Response("bad request", { status: 400 });
-      }
-      await new Store(env.DB).saveForecast(body.kind, body.day, { rows: body.rows, banner: String(body.banner || "").slice(0, 500), data_end: body.data_end });
+      const bad = invalid(body);
+      if (bad) return Response.json({ ok: false, error: bad }, { status: 400 });
+      const store = new Store(env.DB);
+      // first version wins: the workflow fires at two UTC times (summer/winter), and every subscriber of a day
+      // must get the same numbers. A manual re-run passes replace: true.
+      if (!body.replace && (await store.forecast(body.kind, body.day))) return Response.json({ ok: true, kept: "existing" }, { status: 409 });
+      await store.saveForecast(body.kind, body.day, { rows: body.rows, banner: String(body.banner || "").slice(0, 500),
+        data_end: String(body.data_end || "").slice(0, 40), checked_at: String(body.checked_at || "").slice(0, 40) });
       return Response.json({ ok: true, rows: body.rows.length });
     }
     if (request.method === "POST" && url.pathname === "/setup") {
       // the Worker registers its own webhook with its own token: the token never leaves Cloudflare
-      const auth = (request.headers.get("Authorization") || "").replace(/^Bearer /, "");
-      if (!constantTimeEqual(auth, env.INGEST_SECRET)) return new Response("forbidden", { status: 403 });
+      if (!(await sameSecret(bearer(request), env.INGEST_SECRET))) return new Response("forbidden", { status: 403 });
+      const token = String(env.TELEGRAM_BOT_TOKEN || "").trim();
       try {
-        const tg = new Telegram(String(env.TELEGRAM_BOT_TOKEN || "").trim());
+        const tg = new Telegram(token);
         const me = await tg.call("getMe", {});
         await tg.call("setWebhook", { url: `${url.origin}/telegram`, secret_token: env.WEBHOOK_SECRET,
           allowed_updates: ["message", "callback_query"], drop_pending_updates: false });
@@ -92,7 +133,9 @@ export default {
         const info = await tg.call("getWebhookInfo", {});
         return Response.json({ ok: true, bot: me.username, webhook: info.url, pending: info.pending_update_count });
       } catch (e) {
-        return Response.json({ ok: false, error: e.message }, { status: 502 }); // messages never contain the token
+        // our own messages never contain the token; redact anyway in case a runtime error quotes it
+        const safe = String(e?.message || "error").split(token || "\u0000").join("<token>").slice(0, 200);
+        return Response.json({ ok: false, error: safe }, { status: 502 });
       }
     }
     if (url.pathname === "/health") return new Response("ok");
@@ -100,10 +143,11 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    const store = new Store(env.DB), tg = new Telegram(String(env.TELEGRAM_BOT_TOKEN || "").trim());
+    const store = new Store(env.DB), tg = new Telegram(String(env.TELEGRAM_BOT_TOKEN || "").trim(), undefined, undefined, { maxWait: 0, tries: 1 });
+    const budget = { calls: TG_BUDGET };
     for (const slot of dueSlots(new Date(event.scheduledTime))) {
-      const r = await deliver(store, tg, slot);
-      if (r.sent || !r.done) console.log(JSON.stringify({ ...slot, ...r }));
+      const r = await deliver(store, tg, slot, budget, event.scheduledTime);
+      if (r.sent || r.waiting) console.log(JSON.stringify({ ...slot, ...r }));
     }
   },
 };

@@ -31,5 +31,8 @@ results/live/bot_*.csv
 # bot runtime data: subscriber chat ids and settings (personal data), never in git
 data/bot/
 .env*
+*secrets*.env
+worker_secrets.env
+.wrangler/
 !data/snapshot/*.csv
 !data/snapshot/*.gz

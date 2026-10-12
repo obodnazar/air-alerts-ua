@@ -31,7 +31,7 @@ export class Router {
       await this.tg.answer(q.id, note);
       return;
     }
-    const msg = update.message || {}, chat = msg.chat?.id, text = String(msg.text || "").trim().slice(0, 200);
+    const msg = update.message || {}, chat = msg.chat?.id, text = Array.from(String(msg.text || "").trim()).slice(0, 200).join(""); // characters, like Python, not UTF-16 units
     if (!chat || !text || !(await this.store.allowed(chat, this.now().getTime()))) return;
     const cmd = text.split(/\s/)[0].split("@")[0].toLowerCase();
     const sub = await this.store.get(chat);

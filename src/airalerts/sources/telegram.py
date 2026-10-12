@@ -93,7 +93,12 @@ def update(channel: str, out: Path, delay: float = 1.2) -> None:
     newest = newest_saved_id(out) or 0
     before, fresh = None, []
     while True:
-        posts = [p for p in parse_page(fetch_page(channel, before), channel) if p["id"] > newest]
+        page = parse_page(fetch_page(channel, before), channel)
+        if before is None and not page:
+            # the live page of an active channel always shows ~20 posts: none means a block page, a captcha or a
+            # changed layout, not "no news". Fail, so the freshness stamp is not renewed on old data (audit round 2)
+            raise RuntimeError(f"t.me/s/{channel}: no posts parsed from the live page; refusing to call the data fresh")
+        posts = [p for p in page if p["id"] > newest]
         if before is not None:
             posts = [p for p in posts if p["id"] < before]
         if not posts:

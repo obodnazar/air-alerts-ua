@@ -91,11 +91,16 @@ export function mood(p) {
   if (p < 0.5) return "🔔 Середній ризик";
   return "🚨 Високий ризик";
 }
+/** Python's round(): halves go to the even neighbour (round(2.5) == 2), so JS and Python texts match. */
+export function pyRound(x) {
+  const r = Math.round(x);
+  return Math.abs(x % 1) === 0.5 ? 2 * Math.round(x / 2) : r;
+}
 export function bar(p, n = 10) {
-  const k = Math.max(0, Math.min(n, Math.round(p * n)));
+  const k = Math.max(0, Math.min(n, pyRound(p * n)));
   return "▰".repeat(k) + "▱".repeat(n - k);
 }
-const pct = (p) => `${Math.round(p * 100)}%`;
+const pct = (p) => `${pyRound(p * 100)}%`;
 const cpLabel = (cp) => `${String(cp).padStart(2, "0")}:00`;
 
 function eveningBlock(unit, r, cp, style) {
@@ -110,7 +115,7 @@ function morningBlock(unit, r, cp, style) {
   if (!r) return `<b>${esc(short(unit))}</b>\n🔕 Тривоги немає: очний день за розкладом.`;
   const p = r[`p_clear_${cp}`];
   const advice = p < STYLE[style][2] ? "Оголосіть дистанційний день зараз" : `Чекайте контрольної точки ${cpLabel(cp)}`;
-  return `<b>${esc(short(unit))}</b>\n${LEVEL[r.level] || "Тривога"} триває ${Math.round(r.elapsed_min)} хв\n` +
+  return `<b>${esc(short(unit))}</b>\n${LEVEL[r.level] || "Тривога"} триває ${pyRound(r.elapsed_min)} хв\n` +
     `${bar(p)} відбій до ${cpLabel(cp)}: <b>${pct(p)}</b>\n→ <b>${advice}</b>`;
 }
 const tail = (s, banner) => [...(banner && s.banner ? [esc(banner)] : []), DISCLAIMER];

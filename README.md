@@ -185,6 +185,19 @@ After the test, OpenAI Codex audited the repository against [docs/codex-audit-pr
 
 The truncation test was also extended to every feature at every issue time. A mutation test proves it catches a one-hour peek.
 
+**Round 2 (12 Oct, the hosted bot)**, brief: [docs/codex-audit-cloudflare.md](docs/codex-audit-cloudflare.md). Codex found 20 issues (6 high). 19 are fixed with tests (JS 19/19, Python 88/88). One low one is left on purpose: small differences in how JS and Python answer invalid button data. The JS pause date is the more correct one there.
+
+| Finding | Fix |
+|---|---|
+| Broadcast read subscribers N+1, so 24 subscribers broke the 50-queries-per-run D1 limit; the batch cap was per slot, not per run | outbox queue: ≤ 30 D1 queries and 40 Telegram calls per run, shared by all slots (test counts them) |
+| Overlapping runs could lose a message for good (marked sent before sending) | claims with a token and a 15-min lease; a slow run cannot undo a newer one (test simulates the overlap) |
+| Publisher on 25 Oct (25-hour day) skipped Monday's forecast | calendar days, not +24 h |
+| `/ingest` took any date, unknown raions, probabilities outside [0, 1] | field-by-field validation; the committed live forecasts pass it |
+| HTTP 200 with a broken page renewed the freshness stamp on old data | the scraper fails when the live page has no posts |
+| Summer: two cron runs in the window published two versions of a day | the Worker keeps the first version (409); a manual re-run replaces it |
+| Shell injection via the manual `force` input; `worker_secrets.env` not git-ignored | input passed through `env` and validated in Python; ignore rule added |
+| Rate limits and the three-raion cap could be beaten by parallel taps; long 429s slept through; JS rounding and town search differed from Python | single-statement atomic checks; 429 ends the run; Python's rounding and word boundaries ported |
+
 ## After the registered test: fixes, each still checked out of sample
 
 These were designed after seeing the test and the live morning, so they are reported apart from the registered results. Each forecast still uses only days before the forecast day. They are logged in [PREREG.md](PREREG.md), items 6–10. The numbers are on the corrected data.
@@ -224,7 +237,7 @@ Architecture and design notes: [docs/bot-architecture.md](docs/bot-architecture.
 
 **Checked:** 18 offline tests with a fake Telegram, including 14 forged button payloads and spam, (every raion reachable by buttons, town search, settings, idempotent broadcast, schedule incl. weekends, 429 retry, banner confirmation). A real-data dry run produced the evening and morning messages for three subscribers with the live banner.
 
-Free 24/7 hosting: [deploy/README.md](deploy/README.md) (Google Cloud e2-micro, systemd). Independent audit brief: [docs/codex-audit-prompt.md](docs/codex-audit-prompt.md).
+**Hosting (live since 12 Oct):** Cloudflare Workers + D1, free and without a card. The forecasts are computed by GitHub Actions, see [deploy/cloudflare/README.md](deploy/cloudflare/README.md). Alternative: [deploy/README.md](deploy/README.md) (Google Cloud e2-micro, systemd). Independent audit brief: [docs/codex-audit-prompt.md](docs/codex-audit-prompt.md).
 
 ```bash
 export TELEGRAM_BOT_TOKEN=...          # from @BotFather; never committed

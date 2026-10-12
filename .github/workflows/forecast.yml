@@ -1,6 +1,7 @@
 name: forecast
 # Computes the bot's forecast and pushes it to the Cloudflare Worker. Two UTC times per slot cover
-# summer (EEST, UTC+3) and winter (EET, UTC+2); the script itself checks Kyiv time and skips the wrong one.
+# summer (EEST, UTC+3) and winter (EET, UTC+2); the script checks Kyiv time, and the Worker keeps the first
+# forecast of a day if both runs fall inside the window.
 on:
   schedule:
     - cron: "5 17 * * 0-4"   # 20:05 Kyiv in summer time
@@ -40,7 +41,11 @@ jobs:
         env:
           INGEST_URL: ${{ secrets.INGEST_URL }}
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
-        run: PYTHONPATH=src python -m airalerts.botapp.publish ${{ inputs.force && format('--force {0}', inputs.force) || '' }}
+          FORCE: ${{ inputs.force }}   # via env, never pasted into the script: no shell injection (audit round 2)
+        run: |
+          args=()
+          if [ -n "$FORCE" ]; then read -r kind day rest <<< "$FORCE"; args=(--force "$kind" "$day"); fi
+          PYTHONPATH=src python -m airalerts.botapp.publish "${args[@]}"
       - name: keep scraped posts for the next run
         if: always()
         uses: actions/cache/save@v4

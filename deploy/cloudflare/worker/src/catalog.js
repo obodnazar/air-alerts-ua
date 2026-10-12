@@ -5,7 +5,9 @@ export const catalog = CAT;
 
 export function norm(s) {
   let t = s.toLowerCase().replace(/[ʼ’`]/g, "'");
-  t = t.replace(/(територіальна громада|міська|селищна|сільська|громада|район|м\.)/gu, " ");
+  // Python's \b...\b: whole words only ("Красносільська" keeps "сільська"), and "м." only before a letter ("м.Київ")
+  t = t.replace(/(?<![\p{L}\p{N}_])(територіальна громада|міська|селищна|сільська|громада|район)(?![\p{L}\p{N}_])/gu, " ");
+  t = t.replace(/(?<![\p{L}\p{N}_])м\.(?=[\p{L}\p{N}_])/gu, " ");
   return t.replace(/[^a-zа-яіїєґ']+/gu, "");
 }
 

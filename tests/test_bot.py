@@ -332,3 +332,40 @@ def test_typed_town_gets_a_reaction(bot):
     r, tg, _, _, _ = bot
     r.handle({"message": {"chat": {"id": 1}, "message_id": 9, "text": "Ірпінь"}})
     assert ("react", 1, "👀") in tg.calls
+
+
+# ---------- audit round 2 (Codex, 12 Oct): publisher and scraper ----------
+
+def test_publisher_calendar_day_across_dst_end():
+    from airalerts.botapp.publish import what_now
+
+    k = lambda s: pd.Timestamp(s, tz="Europe/Kyiv")  # noqa: E731
+    assert what_now(k("2026-10-25 20:05")) == ("evening", "2026-10-26")  # 25-hour Sunday: +24 h gave Sunday again
+    assert what_now(k("2026-10-12 20:05")) == ("evening", "2026-10-13")
+    assert what_now(k("2026-10-16 20:05")) is None                         # Friday evening: Saturday, no school
+    assert what_now(k("2026-10-26 08:02")) == ("morning", "2026-10-26")
+    assert what_now(k("2026-10-12 17:38")) is None
+
+
+def test_publisher_force_is_validated():
+    from airalerts.botapp.publish import forced
+
+    assert forced("evening", "2026-10-13") == ("evening", "2026-10-13")
+    for bad in [("evil", "2026-10-13"), ("evening", "2026-13-01"), ("evening", "$(printf x)")]:
+        with pytest.raises(SystemExit):
+            forced(*bad)
+
+
+def test_scraper_refuses_an_unexpected_page(tmp_path, monkeypatch):
+    """HTTP 200 with a maintenance page must fail, not count as 'no new posts' (that renewed the freshness stamp)."""
+    from airalerts.sources import telegram as tgs
+
+    out = tmp_path / "posts.jsonl"
+    out.write_text('{"id": 5, "published_at": "2026-10-12T05:00:00+00:00", "text": "x"}\n', encoding="utf-8")
+    monkeypatch.setattr(tgs, "fetch_page", lambda channel, before: "<html>maintenance</html>")
+    with pytest.raises(RuntimeError, match="no posts parsed"):
+        tgs.update("UkraineAlarmSignal", out, delay=0)
+    page = ('<div class="tgme_widget_message_wrap"><div data-post="UkraineAlarmSignal/5">'
+            '<time datetime="2026-10-12T05:00:00+00:00"></time></div>')
+    monkeypatch.setattr(tgs, "fetch_page", lambda channel, before: page)
+    tgs.update("UkraineAlarmSignal", out, delay=0)                       # a quiet channel is fine

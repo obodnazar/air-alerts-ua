@@ -18,16 +18,15 @@ export class Store {
     if (!s) return null;
     return { ...s, units: await this.units(chat) };
   }
+  /** One transaction: the count check and the insert cannot interleave with a parallel tap (audit round 2). */
   async addUnit(chat, unit) {
-    await this.q("INSERT OR IGNORE INTO subs (chat_id) VALUES (?)", chat).run();
-    const have = await this.units(chat);
-    if (have.includes(unit)) { await this.q("UPDATE subs SET active=1 WHERE chat_id=?", chat).run(); return true; }
-    if (have.length >= MAX_UNITS) return false;
     await this.db.batch([
-      this.q("INSERT INTO units VALUES (?, ?, ?)", chat, unit, Date.now()),
-      this.q("UPDATE subs SET unit=?, active=1 WHERE chat_id=?", unit, chat),
+      this.q("INSERT OR IGNORE INTO subs (chat_id) VALUES (?)", chat),
+      this.q(`INSERT OR IGNORE INTO units SELECT ?1, ?2, ?3 WHERE (SELECT count(*) FROM units WHERE chat_id=?1) < ?4
+              OR EXISTS (SELECT 1 FROM units WHERE chat_id=?1 AND unit=?2)`, chat, unit, Date.now(), MAX_UNITS),
+      this.q("UPDATE subs SET unit=?2, active=1 WHERE chat_id=?1 AND EXISTS (SELECT 1 FROM units WHERE chat_id=?1 AND unit=?2)", chat, unit),
     ]);
-    return true;
+    return !!(await this.q("SELECT 1 AS ok FROM units WHERE chat_id=? AND unit=?", chat, unit).first());
   }
   async removeUnit(chat, unit) {
     await this.q("DELETE FROM units WHERE chat_id=? AND unit=?", chat, unit).run();
@@ -42,17 +41,36 @@ export class Store {
   }
   async pause(chat, until) { await this.q("UPDATE subs SET paused_until=? WHERE chat_id=?", until, chat).run(); }
 
-  async active(day) {
-    const r = await this.q("SELECT chat_id FROM subs WHERE active=1 AND (paused_until IS NULL OR paused_until < ?)", day).all();
-    const out = [];
-    for (const { chat_id } of r.results) { const s = await this.get(chat_id); if (s.units.length) out.push(s); }
-    return out;
+  // ---------- delivery outbox (see schema.sql); every step is one statement, so a run stays far under 50 D1 queries ----------
+  /** Queue every subscriber due for this slot. Idempotent (one row per chat, kind and day), so it runs on every tick. */
+  async plan(kind, day, slot) {
+    await this.q(`INSERT OR IGNORE INTO outbox (chat_id, kind, day, slot)
+      SELECT chat_id, ?1, ?2, ?3 FROM subs s WHERE active=1 AND (paused_until IS NULL OR paused_until < ?2)
+        AND (?1 = 'morning' OR evening = ?3) AND EXISTS (SELECT 1 FROM units u WHERE u.chat_id = s.chat_id)`, kind, day, slot).run();
   }
-  async markSent(chat, kind, day) {
-    const r = await this.q("INSERT OR IGNORE INTO sent VALUES (?, ?, ?)", chat, kind, day).run();
-    return r.meta.changes === 1;
+  /** Claim up to `limit` pending rows with this run's token; a row claimed by a run that died is free again after its lease. */
+  async claim(kind, day, slot, token, now, limit, leaseMs = 15 * 60000) {
+    await this.q(`UPDATE outbox SET token=?1, lease=?2 WHERE rowid IN (SELECT rowid FROM outbox
+      WHERE kind=?3 AND day=?4 AND slot=?5 AND state='pending' AND (token IS NULL OR lease < ?6) LIMIT ?7)`,
+    token, now + leaseMs, kind, day, slot, now, limit).run();
+    const subs = (await this.q("SELECT s.* FROM subs s JOIN outbox o ON o.chat_id=s.chat_id WHERE o.token=?", token).all()).results;
+    const units = (await this.q(`SELECT u.chat_id, u.unit FROM units u JOIN outbox o ON o.chat_id=u.chat_id
+      WHERE o.token=? ORDER BY u.added, u.rowid`, token).all()).results;
+    return subs.map((s) => ({ ...s, units: units.filter((u) => u.chat_id === s.chat_id).map((u) => u.unit) }));
   }
-  async unmarkSent(chat, kind, day) { await this.q("DELETE FROM sent WHERE chat_id=? AND kind=? AND day=?", chat, kind, day).run(); }
+  /** Close a run: {chat_id: "sent" | "skipped" | "blocked"}; any claimed row not in it goes back to pending.
+   *  Only rows still carrying this run's token are touched, so a slow run cannot undo a newer one. */
+  async finish(token, outcome) {
+    const blocked = Object.keys(outcome).filter((c) => outcome[c] === "blocked").map(Number);
+    await this.db.batch([
+      this.q(`UPDATE outbox SET state=coalesce(json_extract(?1, '$."' || chat_id || '"'), 'pending'), token=NULL, lease=0
+        WHERE token=?2`, JSON.stringify(outcome), token),
+      ...(blocked.length ? [this.q("UPDATE subs SET active=0 WHERE chat_id IN (SELECT value FROM json_each(?))", JSON.stringify(blocked))] : []),
+    ]);
+  }
+  async pending(kind, day, slot) {
+    return (await this.q("SELECT count(*) AS n FROM outbox WHERE kind=? AND day=? AND slot=? AND state='pending'", kind, day, slot).first()).n;
+  }
   async kv(key, value) {
     if (value === undefined) return (await this.q("SELECT value FROM state WHERE key=?", key).first())?.value ?? null;
     await this.q("INSERT INTO state VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, value).run();
@@ -66,12 +84,13 @@ export class Store {
     const r = await this.q("SELECT body FROM forecasts WHERE kind=? AND day=?", kind, day).first();
     return r ? JSON.parse(r.body) : null;
   }
-  /** Per-chat limit: at most `max` actions in `windowMs`. */
-  async allowed(chat, now = Date.now(), max = 8, windowMs = 10000) {
-    await this.q("DELETE FROM hits WHERE t < ?", now - windowMs).run();
-    const n = (await this.q("SELECT count(*) AS n FROM hits WHERE chat_id=?", chat).first()).n;
-    if (n >= max) return false;
-    await this.q("INSERT INTO hits VALUES (?, ?)", chat, now).run();
-    return true;
+  /** Per-chat and global limits, checked and recorded in one statement (atomic in D1, unlike count-then-insert). */
+  async allowed(chat, now = Date.now(), max = 8, windowMs = 10000, globalMax = 25, globalMs = 1000) {
+    const [, ins] = await this.db.batch([
+      this.q("DELETE FROM hits WHERE t < ?", now - windowMs),
+      this.q(`INSERT INTO hits SELECT ?1, ?2 WHERE (SELECT count(*) FROM hits WHERE chat_id=?1 AND t > ?3) < ?4
+        AND (SELECT count(*) FROM hits WHERE t > ?5) < ?6`, chat, now, now - windowMs, max, now - globalMs, globalMax),
+    ]);
+    return ins.meta.changes === 1;
   }
 }
