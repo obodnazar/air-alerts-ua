@@ -121,3 +121,15 @@ Everything below was designed **after** the test results were seen. It is report
     - Post-hoc item 6 weakened: the per-raion evening all-clear is +5.0% [−1.5, +13.3], no longer significant.
 
     The first run is kept in `results/archive_before_audit/` and in git history.
+
+## Post-hoc: hourly risk for the bot (12 Oct, from ~21:00, after submission)
+
+12. **P(alert active at a whole hour, today or tomorrow), per raion** (`hourly.py`). Asked for a bot button: "is an alert likely at 15:00?". Designed after every result above was known, so it is post-hoc by construction. **The spec and the display rule below were written down before the backtest was run.**
+    - **Target:** alert active in the unit at hour *h*:00 (Kyiv), for every whole hour from the issue time to 23:00 tomorrow (leads 1–47 h).
+    - **Baseline (shown to users when the model does not beat it):** the raion's share of the previous 28 days with an alert at *h*:00.
+    - **Model:** the baseline, adjusted for the state at the issue time.
+      - Alert on now, running *e* min: P = S(L | e) + Σ<sub>τ</sub> f(τ | e) · P<sub>new</sub>(L − τ). S is the Kaplan–Meier survival of alert durations in the previous 42 days (pooled, 24 h+ censored), conditional on the time already elapsed; f is the matching density of the end time.
+      - No alert now: P = P<sub>new</sub>(L) = 1 − (1 − clim)<sup>C(L)</sup>, where C(L) is the share of the alerts covering *h*:00 that start within the last L minutes before it. C comes from the raion's start-time profile by hour (previous 28 days, shrunk to its oblast) and the duration curve S. Under Poisson starts this is exact, and it tends to the baseline as L grows.
+      - Everything is computed from data before 00:00 of the issue day, plus the state at the issue time.
+    - **Backtest:** every day 15 Sep → end of data, weekdays and weekends, issued at every whole hour; Brier skill vs the baseline per lead bucket (1, 2, 3, 4–6, 7–12, 13–24, 25–47 h), separately for "alert on" and "no alert" at issue; paired block bootstrap over issue days (3-day blocks, 1 000 resamples), as for M1.
+    - **Display rule:** the bot shows the model for a (state, lead bucket) only if the 95% CI of its Brier skill is above 0 on the whole backtest **and** the point estimate is above 0 in both halves (15–28 Sep, 29 Sep → end). Everywhere else it shows the plain 28-day share, labelled as history.
