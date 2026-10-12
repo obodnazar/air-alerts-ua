@@ -22,7 +22,7 @@ from .telegram import Blocked, Telegram
 
 KYIV = "Europe/Kyiv"
 COMMANDS = [{"command": "start", "description": "обрати район"}, {"command": "now", "description": "прогноз на завтра"},
-            {"command": "settings", "description": "контрольна точка, ранкові повідомлення"},
+            {"command": "settings", "description": "налаштування"}, {"command": "pause", "description": "пауза на канікули"},
             {"command": "stop", "description": "відписатися"}, {"command": "help", "description": "як це працює"}]
 # prepared only AFTER the issue time (20:00 / 08:00): preparing at 19:45 treated the unknown 19:45-20:00
 # as "no alert" (audit, 12 Oct). Each slot is delivered as soon as the forecast is ready.

@@ -55,6 +55,7 @@ class Router:
             return
         msg = update.get("message") or {}
         chat, text = msg.get("chat", {}).get("id"), (msg.get("text") or "").strip()[:200]
+        mid = msg.get("message_id")
         if not chat or not text or not self._allowed(chat):
             return
         cmd = text.split()[0].split("@")[0].lower()
@@ -67,20 +68,24 @@ class Router:
             if sub:
                 self.store.set(chat, "active", 0)
             self.tg.send(chat, "Відписано. Щоб повернутися, натисніть /start.")
-        elif cmd in ("/settings", "/now"):
+        elif cmd in ("/settings", "/now", "/pause"):
             if not sub or not sub["units"]:
                 self.tg.send(chat, "Спершу оберіть район: /start")
             elif cmd == "/settings":
                 self.tg.send(chat, ui.settings_text(sub), ui.settings_keyboard(sub))
+            elif cmd == "/pause":
+                self.tg.send(chat, *ui.screen("pause", sub))
             else:
                 self.tg.send(chat, self.now_forecast(sub))
         elif not text.startswith("/"):
+            if mid and hasattr(self.tg, "react"):
+                self.tg.react(chat, mid)  # "seen" without an extra message
             hits = catalog.search(text, self.cat)
             if hits and hits[0][1] is None:  # best match is not served: say so, do not offer a look-alike town
                 self.tg.send(chat, f"{hits[0][0].split(' →')[0]}: район зараз не обслуговується "
                                    "(окупація або постійна тривога). Оберіть інший:", ui.oblast_keyboard(self.oblasts))
             elif any(h[1] for h in hits):
-                self.tg.send(chat, "Знайшов. Оберіть:", ui.search_keyboard(hits, self.index))
+                self.tg.send(chat, ui.search_text(hits), ui.search_keyboard(hits, self.index))
             else:
                 self.tg.send(chat, "Не знайшов такого міста чи району. Оберіть зі списку:", ui.oblast_keyboard(self.oblasts))
         else:
@@ -114,29 +119,33 @@ class Router:
             self.tg.edit(chat, mid, "Оберіть область:", ui.oblast_keyboard(self.oblasts))
         elif kind == "u" and (unit := self._unit(val)):
             if self.store.add_unit(chat, unit):
-                sub = self.store.get(chat)
-                self.tg.edit(chat, mid, f"✅ Стежу за: {', '.join(sub['units'])}.\nПрогноз прийде о {sub['evening']}. "
-                                        f"Контрольна точка школи: {sub['cp']:02d}:00. Налаштування: /settings · прогноз зараз: /now")
+                self.tg.edit(chat, mid, ui.done_text(self.store.get(chat)), ui.done_keyboard())
             else:
                 note = f"Можна стежити щонайбільше за {MAX_UNITS} районами. Приберіть один у /settings."
         elif kind == "rm" and (unit := self._unit(val)) and self.store.get(chat):
             self.store.remove_unit(chat, unit)
             sub = self.store.get(chat)
             self.tg.edit(chat, mid, "🏫 Мої райони", ui.units_keyboard(sub["units"], self.index, len(sub["units"]) < MAX_UNITS))
-        elif kind == "units" and (sub := self.store.get(chat)):
-            self.tg.edit(chat, mid, "🏫 Мої райони", ui.units_keyboard(sub["units"], self.index, len(sub["units"]) < MAX_UNITS))
-        elif kind == "pause":
-            self.tg.edit(chat, mid, "Пауза: на канікули чи хворобу, щоб бот не писав.", ui.pause_keyboard())
+        elif kind == "now" and (sub := self.store.get(chat)):
+            self.tg.send(chat, self.now_forecast(sub))
+        elif kind == "s" and (sub := self.store.get(chat)):
+            if val == "units":
+                self.tg.edit(chat, mid, "🏫 <b>Мої райони</b> (до 3)",
+                             ui.units_keyboard(sub["units"], self.index, len(sub["units"]) < MAX_UNITS))
+            elif val in ui.SCREENS:
+                self.tg.edit(chat, mid, *ui.screen(val, sub))
+            else:
+                self._settings(chat, mid)
         elif kind == "p" and val in ("0", "7", "14") and self.store.get(chat):
             until = None if val == "0" else (pd.Timestamp.now(tz="Europe/Kyiv") + pd.Timedelta(days=int(val))).strftime("%Y-%m-%d")
             self.store.pause(chat, until)
             self._settings(chat, mid)
+            note = "Пауза знята ▶️" if val == "0" else f"Пауза до {until} ⏸"
         elif kind in ("cp", "ev", "st", "m", "bn", "set") and self.store.get(chat):
             field = {"cp": "cp", "ev": "evening", "st": "style", "m": "morning", "bn": "banner"}.get(kind)
             if field:
                 value = _int(val) if field in ("cp", "banner") else val
-                if not self.store.set(chat, field, value):
-                    note = "Невідоме значення."
+                note = "Збережено ✓" if self.store.set(chat, field, value) else "Невідоме значення."
             self._settings(chat, mid)
         return note
 

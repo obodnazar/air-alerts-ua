@@ -50,10 +50,20 @@ class Telegram:
 
     # thin helpers used by the router
     def send(self, chat_id, text, keyboard=None):
-        return self.call("sendMessage", chat_id=chat_id, text=text, reply_markup=keyboard)
+        return self.call("sendMessage", chat_id=chat_id, text=text, reply_markup=keyboard, parse_mode="HTML",
+                         link_preview_options={"is_disabled": True})
 
     def edit(self, chat_id, message_id, text, keyboard=None):
-        return self.call("editMessageText", chat_id=chat_id, message_id=message_id, text=text, reply_markup=keyboard)
+        return self.call("editMessageText", chat_id=chat_id, message_id=message_id, text=text, reply_markup=keyboard,
+                         parse_mode="HTML", link_preview_options={"is_disabled": True})
+
+    def react(self, chat_id, message_id, emoji="👀"):
+        """Acknowledge a typed message with a reaction instead of an extra message (nice-to-have: never fails)."""
+        try:
+            return self.call("setMessageReaction", chat_id=chat_id, message_id=message_id,
+                             reaction=[{"type": "emoji", "emoji": emoji}])
+        except Exception:
+            return None
 
     def answer(self, callback_id, text=None):
         return self.call("answerCallbackQuery", callback_query_id=callback_id, text=text)

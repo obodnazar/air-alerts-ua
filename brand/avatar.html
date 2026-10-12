@@ -1,0 +1,47 @@
+<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:transparent}svg{display:block}</style></head><body>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1f4b"/>
+      <stop offset="0.45" stop-color="#4b3f8f"/>
+      <stop offset="0.72" stop-color="#e0729a"/>
+      <stop offset="1" stop-color="#ffc27a"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#fff6d6"/>
+      <stop offset="0.6" stop-color="#ffd27a"/>
+      <stop offset="1" stop-color="#ffb35c"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffe2a6" stop-opacity="0.75"/>
+      <stop offset="1" stop-color="#ffe2a6" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="circle"><circle cx="512" cy="512" r="512"/></clipPath>
+  </defs>
+  <g>
+    <rect width="1024" height="1024" fill="url(#sky)"/>
+    <!-- a few calm stars that fade toward dawn -->
+    <g fill="#ffffff">
+      <circle cx="210" cy="190" r="7" opacity="0.9"/><circle cx="330" cy="120" r="4" opacity="0.7"/>
+      <circle cx="760" cy="170" r="6" opacity="0.85"/><circle cx="860" cy="290" r="4" opacity="0.6"/>
+      <circle cx="150" cy="340" r="4" opacity="0.5"/><circle cx="640" cy="95" r="3.5" opacity="0.6"/>
+    </g>
+    <!-- sunrise -->
+    <circle cx="512" cy="600" r="400" fill="url(#glow)"/>
+    <circle cx="512" cy="600" r="235" fill="url(#sun)"/>
+    <!-- horizon: soft hills -->
+    <path d="M0 640 C 180 590, 330 640, 512 626 C 700 610, 840 590, 1024 640 L1024 1024 L0 1024 Z" fill="#2a2563"/>
+    <path d="M0 760 C 220 720, 380 770, 560 752 C 760 734, 880 740, 1024 770 L1024 1024 L0 1024 Z" fill="#1d1a4a"/>
+    <!-- minimal school roof with a small bell window -->
+    <g transform="translate(512 700) scale(1.55)">
+      <rect x="-14" y="-150" width="28" height="44" rx="4" fill="#fff3df"/>
+      <path d="M-22 -150 L0 -172 L22 -150 Z" fill="#fff3df"/>
+      <circle cx="0" cy="-128" r="7" fill="#ffb35c"/>
+      <path d="M-130 0 L0 -104 L130 0 Z" fill="#fff3df"/>
+      <rect x="-104" y="0" width="208" height="96" rx="8" fill="#fff3df"/>
+      <rect x="-80" y="22" width="34" height="30" rx="5" fill="#2a2563" opacity="0.85"/>
+      <rect x="46" y="22" width="34" height="30" rx="5" fill="#2a2563" opacity="0.85"/>
+      <rect x="-22" y="32" width="44" height="64" rx="22" fill="#2a2563"/>
+    </g>
+  </g>
+</svg></body></html>

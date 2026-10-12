@@ -36,6 +36,9 @@ class FakeTG:
     def answer(self, cid, text=None):
         self.calls.append(("answer", cid, text))
 
+    def react(self, chat, mid, emoji="👀"):
+        self.calls.append(("react", chat, emoji))
+
 
 class Clock:
     t = 0.0
@@ -237,9 +240,9 @@ def test_morning_only_alert_unless_always_and_style():
     m = pd.DataFrame([dict(unit="Київ", level="red", elapsed_min=130, p_clear_9=0.1, p_clear_10=0.3, p_clear_11=0.4, p_clear_12=0.5)])
     broadcast("morning", pd.Timestamp("2026-10-13"), st, tg, m, "⚠️ банер", pause=0)
     texts = {c[1]: c[2] for c in tg.calls}
-    assert "оголосіть дистанційний день" in texts[1] and "⚠️ банер" in texts[1]
+    assert "Оголосіть дистанційний день" in texts[1] and "⚠️ банер" in texts[1]
     assert "Тривоги немає" in texts[2]
-    assert "чекайте" in texts[3]  # bold style calls a remote day only below 25%
+    assert "Чекайте" in texts[3]  # bold style calls a remote day only below 25%
 
 
 @pytest.mark.parametrize("now,kind,expected", [
@@ -290,3 +293,42 @@ def test_texts_fit_telegram():
     sub = dict(units=["Київ", "Бучанський район", "Харківський район"], cp=10, style="balanced", banner=1)
     t = ui.evening_message(sub, {r["unit"]: r for r in frame().to_dict("records")}, pd.Timestamp("2026-10-13"), "⚠️ " * 200)
     assert len(t) < 4096 and ui.DISCLAIMER in t
+
+
+def test_mobile_labels_fit():
+    """No button label longer than ~30 chars; two buttons share a row only when both are ≤ 14."""
+    cat, st = catalog.load(), Store(":memory:")
+    st.add_unit(1, "Білоцерківський район")
+    sub = st.get(1)
+    boards = [ui.oblast_keyboard(list(cat["oblasts"])), ui.settings_keyboard(sub)] + \
+             [ui.screen(n, sub)[1] for n in ui.SCREENS] + \
+             [ui.raion_keyboard(us, {u: i for i, u in enumerate(cat["units"])}) for us in cat["oblasts"].values()]
+    for b in boards:
+        for row in b["inline_keyboard"]:
+            for x in row:
+                assert len(x["text"]) <= 30, x["text"]
+                assert x.get("style") in (None, "primary", "success")
+            if len(row) == 2:
+                assert all(len(x["text"]) <= 16 for x in row), [x["text"] for x in row]
+
+
+def test_onboarding_three_taps_and_settings_navigation(bot):
+    r, tg, st, cat, clock = bot
+    r.handle(msg("/start"))
+    kyiv_ob = list(cat["oblasts"]).index("м. Київ")
+    r.handle(cb(f"ob:{kyiv_ob}"))
+    r.handle(cb(unit_cb(cat, "Київ")))
+    assert "Готово" in [c for c in tg.calls if c[0] == "edit"][-1][2]
+    for screen_name in ("root", "cp", "ev", "st", "m", "bn", "pause", "units"):
+        clock.t += 2
+        r.handle(cb(f"s:{screen_name}"))
+        assert [c for c in tg.calls if c[0] == "edit"][-1][3]["inline_keyboard"]
+    clock.t += 2
+    r.handle(cb("cp:11"))
+    assert tg.calls[-1] == ("answer", "q", "Збережено ✓")
+
+
+def test_typed_town_gets_a_reaction(bot):
+    r, tg, _, _, _ = bot
+    r.handle({"message": {"chat": {"id": 1}, "message_id": 9, "text": "Ірпінь"}})
+    assert ("react", 1, "👀") in tg.calls

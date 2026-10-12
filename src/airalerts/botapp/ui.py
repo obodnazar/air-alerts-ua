@@ -1,99 +1,192 @@
-"""Message texts and inline keyboards. Pure functions: easy to test, no network."""
+"""Texts and keyboards (v3, mobile-first). Pure functions: no network.
+
+Design rules (docs/research/10-bot-ux.md, checked against core.telegram.org):
+- a button label fits a phone: ≤ ~14 characters when two share a row, otherwise one per row;
+- the verdict comes first, details go into an expandable quote;
+- risk = word + weather shape (☀️ ⛅ 🌧), never colour alone; red/yellow stay reserved for real alert levels;
+- button `style` only "primary" (blue) / "success" (green) for the main action, never "danger".
+"""
 
 from __future__ import annotations
 
+from html import escape
+
 DOW = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
 LEVEL = {"red": "🔴 червона тривога", "yellow": "🟡 жовта тривога"}
-DISCLAIMER = "Прогноз, а не сигнал. Слухайте офіційні тривоги."
-# advice thresholds; "balanced" = the values chosen on validation (Aug 2026)
-STYLE = {"careful": ("обережний", 0.25, 0.45), "balanced": ("збалансований", 0.35, 0.35), "bold": ("сміливий", 0.45, 0.25)}
-#        name        evening: advise remote if P(remote day) > x   morning: call remote if P(all-clear in time) < y
+DISCLAIMER = "<i>Прогноз, а не сигнал. Слухайте офіційні тривоги.</i>"
+STYLE = {"careful": ("🛡 Обережно", 0.25, 0.45), "balanced": ("⚖️ Баланс", 0.35, 0.35), "bold": ("⚡ Сміливо", 0.45, 0.25)}
+#        label          evening: advise remote if P(remote day) > x   morning: call remote if P(all-clear in time) < y
 
-WELCOME = ("Привіт! Я «Шкільний ранок».\n\n"
-           "О 20:00 надсилаю прогноз на ранок для вашого району: чи буде тривога о 08:00 і чи встигне відбій до "
-           "контрольної точки школи (за правилом МОН). О 08:05, якщо триває тривога, кажу, чекати чи "
-           "оголошувати дистанційний день.\n\nОберіть область або просто напишіть назву міста чи району.")
-HELP = ("/start: додати район\n/now: прогноз на завтра\n/settings: райони, контрольна точка, час, стиль порад, пауза\n"
-        "/stop: відписатися\n\nЯк це рахується: модель на історії тривог з грудня 2025, перевірена на вересні–жовтні 2026. "
-        "Код і методика: github.com/obodnazar/air-alerts-ua")
+WELCOME = ("<b>Привіт! Я прогноз шкільного ранку 🌅</b>\n\n"
+           "О 20:00 напишу, чи буде тривога о 08:00 у вашому районі і чи встигне відбій до контрольної точки школи. "
+           "О 08:05, якщо тривога, підкажу: чекати чи вчитися з дому.\n\n"
+           "Оберіть область 👇 або просто напишіть місто.")
+HELP = ("<b>Команди</b>\n/start · обрати район\n/now · прогноз на завтра\n/settings · налаштування\n"
+        "/pause · пауза на канікули\n/stop · відписатися\n\n"
+        "<blockquote expandable>Як це працює: модель на історії тривог з грудня 2025, перевірена на вересні–жовтні 2026 "
+        "(на 07:00 точніша за найкраще просте правило на 7.8%). Правило МОН: тривога о 08:00 означає дистанційний старт, "
+        "відбій до контрольної точки означає очні уроки. Код і методика: github.com/obodnazar/air-alerts-ua</blockquote>")
+
+
+def btn(text, data, style=None):
+    b = {"text": text, "callback_data": data}
+    if style in ("primary", "success"):
+        b["style"] = style
+    return b
 
 
 def kb(rows):
-    return {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in rows]}
+    return {"inline_keyboard": [[btn(*b) if isinstance(b, tuple) else b for b in row] for row in rows]}
+
+
+def _pairs(buttons, limit=14):
+    """Two per row only when both labels are short enough for a phone; otherwise one per row."""
+    rows, i = [], 0
+    while i < len(buttons):
+        if i + 1 < len(buttons) and len(buttons[i][0]) <= limit and len(buttons[i + 1][0]) <= limit:
+            rows.append([buttons[i], buttons[i + 1]])
+            i += 2
+        else:
+            rows.append([buttons[i]])
+            i += 1
+    return rows
+
+
+def short(unit: str) -> str:
+    return unit.replace(" район", "")
 
 
 def oblast_keyboard(oblasts: list[str]):
     names = [(o.replace(" область", "").replace("м. ", ""), f"ob:{i}") for i, o in enumerate(oblasts)]
-    return kb([names[i:i + 2] for i in range(0, len(names), 2)])
+    return kb(_pairs(names))
 
 
 def raion_keyboard(units: list[str], index: dict):
-    btn = [(u.replace(" район", ""), f"u:{index[u]}") for u in units]
-    return kb([btn[i:i + 2] for i in range(0, len(btn), 2)] + [[("← до областей", "back")]])
+    return kb([[(short(u), f"u:{index[u]}")] for u in units] + [[("← Області", "back")]])
 
 
 def search_keyboard(hits, index: dict):
-    rows = [[(label[:60], f"u:{index[u]}")] for label, u in hits if u]
-    return kb(rows + [[("Обрати зі списку областей", "back")]])
+    seen, rows = set(), []
+    for _, u in hits:
+        if u and u not in seen:
+            seen.add(u)
+            rows.append([(f"📍 {short(u)}", f"u:{index[u]}")])
+    return kb(rows + [[("Обрати зі списку", "back")]])
 
 
-def _tick(ok: bool, label: str) -> str:
-    return ("✅ " if ok else "") + label
+def search_text(hits) -> str:
+    names = [escape(label.split(" →")[0].replace(" міська громада", "").replace(" громада", "")) for label, u in hits if u]
+    return "Знайшов 👇" + (f"\n<i>{', '.join(dict.fromkeys(names))}</i>" if names else "")
 
+
+def done_text(sub: dict) -> str:
+    return (f"✅ <b>Готово!</b> Стежу за: {escape(', '.join(map(short, sub['units'])))}.\n"
+            f"Прогноз прийде о <b>{sub['evening']}</b>. Контрольна точка школи: <b>{sub['cp']:02d}:00</b>.")
+
+
+def done_keyboard():
+    return kb([[("🌙 Прогноз зараз", "now", "primary")], [("⚙️ Налаштувати", "s:root")]])
+
+
+# ---------- settings: a menu with current values, one row each; tap → its own screen ----------
 
 def settings_text(sub: dict) -> str:
-    style = STYLE[sub["style"]][0]
     pause = f"\n⏸ Пауза до {sub['paused_until']}" if sub.get("paused_until") else ""
-    return (f"⚙️ Налаштування\nРайони: {', '.join(sub['units']) or 'не обрано'}\n"
-            f"Контрольна точка: {sub['cp']:02d}:00 · вечірній прогноз о {sub['evening']} · порада: {style}{pause}")
+    return f"⚙️ <b>Налаштування</b>{pause}"
 
 
 def settings_keyboard(sub: dict):
+    m = "при тривозі" if sub["morning"] == "alert" else "щоранку"
     return kb([
-        [("🏫 Мої райони", "units")],
-        [(_tick(sub["cp"] == cp, f"{cp:02d}:00"), f"cp:{cp}") for cp in (9, 10, 11, 12)],
-        [(_tick(sub["evening"] == t, f"🌙 {t}"), f"ev:{t}") for t in ("20:00", "20:30", "21:00")],
-        [(_tick(sub["style"] == k, v[0]), f"st:{k}") for k, v in STYLE.items()],
-        [(_tick(sub["morning"] == "alert", "☀️ лише при тривозі"), "m:alert"), (_tick(sub["morning"] == "always", "☀️ щоранку"), "m:always")],
-        [(_tick(bool(sub["banner"]), "📰 новини"), f"bn:{0 if sub['banner'] else 1}"), ("⏸ пауза", "pause")],
+        [(f"🏫 Райони · {len(sub['units'])}", "s:units")],
+        [(f"🔔 Контрольна точка · {sub['cp']:02d}:00", "s:cp")],
+        [(f"🌙 Прогноз о · {sub['evening']}", "s:ev")],
+        [(f"🎚 Поради · {STYLE[sub['style']][0].split()[1]}", "s:st")],
+        [(f"☀️ Ранок · {m}", "s:m")],
+        [(f"📰 Новини · {'так' if sub['banner'] else 'ні'}", "s:bn")],
+        [("⏸ Пауза", "s:pause")],
     ])
 
 
+SCREENS = {
+    "cp": ("🔔 <b>Контрольна точка школи</b>\nДо цієї години має прийти відбій, щоб діти пішли на очні уроки (правило МОН).",
+           lambda s: [[(("✓ " if s["cp"] == c else "") + f"{c:02d}:00", f"cp:{c}") for c in (9, 10, 11, 12)]]),
+    "ev": ("🌙 <b>Коли надсилати прогноз</b>",
+           lambda s: [[(("✓ " if s["evening"] == t else "") + t, f"ev:{t}") for t in ("20:00", "20:30", "21:00")]]),
+    "st": ("🎚 <b>Як охоче радити дистанційний ранок</b>\nБаланс: пороги, перевірені на даних.",
+           lambda s: [[(("✓ " if s["style"] == k else "") + v[0], f"st:{k}")] for k, v in STYLE.items()]),
+    "m": ("☀️ <b>Ранкове повідомлення о 08:05</b>",
+          lambda s: [[(("✓ " if s["morning"] == "alert" else "") + "🔔 При тривозі", "m:alert"),
+                      (("✓ " if s["morning"] == "always" else "") + "📅 Щоранку", "m:always")]]),
+    "bn": ("📰 <b>Банер новин</b>\nПро перемир'я чи попередження про масовану атаку. Цифри прогнозу він не змінює.",
+           lambda s: [[(("✓ " if s["banner"] else "") + "Так", "bn:1"), (("✓ " if not s["banner"] else "") + "Ні", "bn:0")]]),
+    "pause": ("⏸ <b>Пауза</b>\nНа канікули чи хворобу, щоб я не писав.",
+              lambda s: [[("1 тиждень", "p:7"), ("2 тижні", "p:14")], [("▶️ Відновити", "p:0")]]),
+}
+
+
+def screen(name: str, sub: dict):
+    text, rows = SCREENS[name]
+    return text, kb(rows(sub) + [[("← Назад", "s:root")]])
+
+
 def units_keyboard(units: list[str], index: dict, can_add: bool):
-    rows = [[(f"❌ {u}", f"rm:{index[u]}")] for u in units]
+    rows = [[(f"✕ {short(u)}", f"rm:{index[u]}")] for u in units]
     if can_add:
-        rows.append([("➕ додати район", "add")])
-    return kb(rows + [[("← налаштування", "set")]])
+        rows.append([("＋ Додати район", "add", "primary")])
+    return kb(rows + [[("← Назад", "s:root")]])
 
 
 def pause_keyboard():
-    return kb([[("1 тиждень", "p:7"), ("2 тижні", "p:14")], [("▶️ відновити", "p:0")], [("← налаштування", "set")]])
+    return screen("pause", {})[1]
+
+
+# ---------- forecasts ----------
+
+def mood(p_alert: float) -> str:
+    if p_alert < 0.2:
+        return "☀️ Спокійний ранок"
+    if p_alert < 0.5:
+        return "⛅ Можлива тривога"
+    return "🌧 Тривожний ранок"
+
+
+def bar(p: float, n: int = 10) -> str:
+    k = max(0, min(n, round(p * n)))
+    return "▰" * k + "▱" * (n - k)
 
 
 def _evening_block(unit: str, row: dict, cp: int, style: str) -> str:
-    p_clear = row[f"p_clear_{cp}"]
-    p_remote = row["p_alert_08"] * (1 - p_clear)
-    advice = "розгляньте дистанційний ранок" if p_remote > STYLE[style][1] else "плануйте очний день"
-    return (f"🏫 {unit}\nТривога о 08:00: {row['p_alert_08']:.0%} (зазвичай {row['usual']:.0%})\n"
-            f"Якщо буде, відбій до {cp:02d}:00: {p_clear:.0%}\nУвесь день дистанційно: {p_remote:.0%}\n→ {advice}.")
+    p_alert, p_clear = row["p_alert_08"], row[f"p_clear_{cp}"]
+    p_remote = p_alert * (1 - p_clear)
+    advice = "Розгляньте дистанційний ранок" if p_remote > STYLE[style][1] else "Плануйте очний день"
+    return (f"<b>{escape(short(unit))}</b>\n{mood(p_alert)} · тривога о 08:00: <b>{p_alert:.0%}</b>\n"
+            f"{bar(p_alert)} <i>зазвичай {row['usual']:.0%}</i>\n"
+            f"Якщо буде, відбій до {cp:02d}:00: {p_clear:.0%} · увесь день дистанційно: {p_remote:.0%}\n"
+            f"→ <b>{advice}</b>")
 
 
 def _morning_block(unit: str, row: dict | None, cp: int, style: str) -> str:
     if row is None:
-        return f"🏫 {unit}\nТривоги немає: очний день за розкладом."
+        return f"<b>{escape(short(unit))}</b>\n☀️ Тривоги немає: очний день за розкладом."
     p = row[f"p_clear_{cp}"]
     advice = "оголосіть дистанційний день зараз" if p < STYLE[style][2] else f"чекайте контрольної точки {cp:02d}:00"
-    return (f"🏫 {unit}\n{LEVEL.get(row['level'], 'Тривога')} триває {row['elapsed_min']:.0f} хв.\n"
-            f"Відбій до {cp:02d}:00: {p:.0%}\n→ {advice}.")
+    return (f"<b>{escape(short(unit))}</b>\n{LEVEL.get(row['level'], 'Тривога')} триває {row['elapsed_min']:.0f} хв\n"
+            f"{bar(p)} відбій до {cp:02d}:00: <b>{p:.0%}</b>\n→ <b>{advice[0].upper() + advice[1:]}</b>")
+
+
+def _tail(sub, banner):
+    return ([escape(banner)] if banner and sub["banner"] else []) + [DISCLAIMER]
 
 
 def evening_message(sub: dict, rows: dict, day, banner: str = "") -> str | None:
     blocks = [_evening_block(u, rows[u], sub["cp"], sub["style"]) for u in sub["units"] if u in rows]
     if not blocks:
         return None
-    head = f"🌙 Прогноз на {DOW[day.weekday()]} {day:%d.%m}"
-    tail = ([banner] if banner and sub["banner"] else []) + [DISCLAIMER]
-    return "\n\n".join([head, *blocks, *tail])
+    head = f"🌙 <b>Прогноз на {DOW[day.weekday()]} {day:%d.%m}</b>"
+    how = ("<blockquote expandable>Тривога о 08:00 означає дистанційний старт; відбій до контрольної точки означає очні "
+           "уроки (МОН, лист №1/19575). «Зазвичай» означає частку ранків з тривогою за останні 28 днів.</blockquote>")
+    return "\n\n".join([head, *blocks, how, *_tail(sub, banner)])
 
 
 def morning_message(sub: dict, rows: dict, day, banner: str = "") -> str | None:
@@ -101,11 +194,9 @@ def morning_message(sub: dict, rows: dict, day, banner: str = "") -> str | None:
     if not units:
         return None
     blocks = [_morning_block(u, rows.get(u), sub["cp"], sub["style"]) for u in units]
-    tail = ([banner] if banner and sub["banner"] else []) + [DISCLAIMER]
-    return "\n\n".join([f"☀️ {day:%d.%m} 08:05", *blocks, *tail])
+    return "\n\n".join([f"🌅 <b>{day:%d.%m} · 08:05</b>", *blocks, *_tail(sub, banner)])
 
 
-# single-raion helpers kept for the CLI brief and older tests
 def evening_text(unit, row, cp, day, banner=""):
     return evening_message(dict(units=[unit], cp=cp, style="balanced", banner=1), {unit: row}, day, banner)
 
