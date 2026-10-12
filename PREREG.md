@@ -97,3 +97,27 @@ Everything below was designed **after** the test results were seen. It is report
    - **H1b, warning as a feature at 20:00:** no gain on validation (−1e-5); rejected by the registered rule.
    - **H2, truce news clusters (n=7, from Dec 2025):** alert hours per unit fell in the 3 days after 6 of 7 clusters (mean −0.6 h/day). Too few events, and confounded by weekly patterns, so no causal claim.
    - **Use in the product:** a banner in the brief ("situation changed"), not a model feature.
+
+## Independent audit and corrected re-run (12 Oct, ~15:30)
+
+11. **An external audit (OpenAI Codex, brief in `docs/codex-audit-prompt.md`) found data and label bugs that touched the registered test.** Each was reproduced by hand before fixing; each has a regression test.
+    - **Parser:** 752 multi-section posts were read as one event.
+    - **Timestamps:** times were floored to the minute (a 40-second peek).
+    - **Labels:** censored all-clears were scored as cleared.
+    - **Baseline:** the KM baseline used all training days instead of the registered 60.
+    - **Stitching:** alerts crossing the source switch could vanish.
+    - **Reproducibility:** a fresh clone chose a different feature set.
+
+    **Only data, labels and the registered baseline were corrected.** Models, features, windows, thresholds and the 1-SE rule are unchanged. The full pipeline was re-run once.
+
+    | | before the fixes | after the fixes | criterion |
+    |---|---|---|---|
+    | M1 07:00 vs strongest | +6.7% [+1.3, +13.0] | +7.8% [+2.7, +13.3] | met |
+    | M1 20:00 vs strongest | +2.6% [−3.2, +8.1] | +5.1% [+2.7, +8.0] | now met |
+    | M2 vs KM (last 60 days) | +9.2% [−1.0, +21.0] | +12.2% [+1.8, +24.7] | now met |
+
+    **Caution:** two criteria flipped to "met" after a correction made after seeing the test, so they deserve less trust than the 07:00 result, which held in both runs.
+    - On corrected labels, the Air Force features pass the 1-SE rule for M2 on validation (gain 0.0022, SE 0.0017) and are used there.
+    - Post-hoc item 6 weakened: the per-raion evening all-clear is +5.0% [−1.5, +13.3], no longer significant.
+
+    The first run is kept in `results/archive_before_audit/` and in git history.

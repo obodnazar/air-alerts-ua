@@ -6,11 +6,10 @@ KSE Agentic AI School 2026, Stage 2. Time series analysis of air raid alerts in 
 
 > **Коротко українською.** Школа щоранку вирішує за правилом МОН (лист №1/19575 від 11.09.2026). Якщо о 08:00 тривога, день починається дистанційно. Якщо відбій приходить до контрольної точки (наприклад, 10:00), діти йдуть на очне навчання, інакше весь день дистанційний. Ми прогнозуємо по кожному району ймовірність тривоги о 08:00 (о 20:00 напередодні і о 07:00), ймовірність відбою до контрольної точки і ціну різних стратегій школи. Перевірено на 1.09–9.10.2026.
 >
-> Результати:
-> - **Прогноз о 07:00 значуще кращий** за найсильніше просте правило: +6.7%.
-> - Прогноз о 20:00 і модель відбою на тесті значущої переваги **не показали**.
+> Результати (після виправлень за незалежним аудитом; числа до аудиту теж показані нижче):
+> - **Усі три прогнози значуще кращі** за найсильніше просте правило: о 07:00 на +7.8%, о 20:00 на +5.1%, відбій до 10:00 на +12.2%.
 > - Найбільший виграш для шкіл дає **вибір контрольної точки під свій район**.
-> - Порайонні тривоги зберегли **1 934 шкільні ранки**.
+> - Порайонні тривоги зберегли **1 910 шкільних ранків**.
 
 ## The decision
 
@@ -33,9 +32,9 @@ So three questions matter, for each raion:
 | Source | Used for | Finding |
 |---|---|---|
 | [Vadimkin dataset](https://github.com/Vadimkin/ukrainian-air-raid-sirens-dataset), official feed | 15 Dec 2025 → 27 Aug 2026 | **38% exact duplicate rows**. **Outage 29 Aug – 2 Sep** (0 alerts on 30 Aug – 1 Sep while the volunteer feed has ~170/day). **Stops on 7 Sep 2026**, when its source channel went silent after the yellow/red reform |
-| Telegram [@UkraineAlarmSignal](https://t.me/s/UkraineAlarmSignal), scraped (61 300 posts, 15 Aug → 11 Oct) | 28 Aug → now | Same state signal, with **yellow/red level** and level changes. When the official feed works, the two agree on **96–97% of alert starts within 2 min, both ways** ([source_agreement.csv](results/source_agreement.csv)) |
+| Telegram [@UkraineAlarmSignal](https://t.me/s/UkraineAlarmSignal), scraped (61 834 posts, 15 Aug → 12 Oct) | 28 Aug → now | Same state signal, with **yellow/red level** and level changes. When the official feed works, the two agree on **96–97% of alert starts within 2 min, both ways** ([source_agreement.csv](results/source_agreement.csv)). 752 posts carry several sections (e.g. a yellow start and an all-clear): the first parser read them as one event; fixed after the audit |
 | Kaggle [Massive Missile Attacks on Ukraine](https://www.kaggle.com/datasets/piterfm/massive-missile-attacks-on-ukraine) | days since a mass night, drones in 7 days | A night's report is usable only after it is published (time_end + 2 h) |
-| Telegram @kpszsu (Air Force), scraped (36 560 posts, Dec → Oct) | candidate feature | Did not pass validation, see below |
+| Telegram @kpszsu (Air Force), scraped (36 560 posts, Dec → Oct; threat-post snapshot committed) | candidate features | Kept only for the all-clear model, where they pass the 1-SE rule on validation by a small margin |
 
 Other traps found on the way:
 - Three raions **renamed in 2024** had different names in the two sources.
@@ -79,43 +78,50 @@ Everything a model sees is computed **as of the issue time**. Plain-language wal
 
 Every change after registration is listed there with its time and reason, including one crashed test run.
 
-**Tests:** [tests/test_units.py](tests/test_units.py) (8, no data needed: the parser on real post formats, the MoE rule, the level in force at a given time, the guard) and **leakage controls** in [tests/test_leakage.py](tests/test_leakage.py) (8, run on the downloaded data):
+**Tests (82):** the parser on real post formats (incl. multi-section posts), the MoE rule, censoring, stitching at the source switch, the bot (see below), and **leakage controls** ([tests/test_leakage.py](tests/test_leakage.py)):
 - `available_at <= issue_time` on every row;
-- features recomputed on a world **truncated at the issue time** equal the full-data features;
+- **every feature column at 20:00, 07:00 and 08:00** recomputed on a world **truncated at the issue time** equals the full-data value;
+- a **mutation test**: a feature made to peek one hour ahead must make that check fail;
 - a **planted leak** must trip the guard (AUC > 0.995 aborts);
-- a check that the truncation test itself detects a feature that peeks 12 h ahead;
-- attack reports are never available before their window ends;
-- Air Force post counts use only earlier posts.
+- attack reports are never available before their window ends; Air Force post counts use only earlier posts.
 
 ## Results (test: 1 Sep – 9 Oct 2026, 104 units, 29 weekdays)
 
 ![skill](figures/test_skill.png)
 
-| Question | Model | vs strongest baseline | 95% CI | Pre-registered criterion |
-|---|---|---|---|---|
-| Alert at 08:00, issued **07:00** | logistic | **+6.7%** Brier skill (vs rolling Markov) | +1.3% … +13.0% | **met** |
-| Alert at 08:00, issued 20:00 | logistic | +2.6% (vs rolling Markov) | −3.2% … +8.1% | not met |
-| All-clear by 10:00 | logistic | +9.2% (vs Kaplan–Meier) | −1.0% … +21.0% | not met |
+| Question | Model | vs strongest baseline | 95% CI | Criterion | Before the audit fixes |
+|---|---|---|---|---|---|
+| Alert at 08:00, issued **07:00** | logistic | **+7.8%** Brier skill (vs rolling Markov) | +2.7% … +13.3% | **met** | +6.7% [+1.3, +13.0], met |
+| Alert at 08:00, issued **20:00** | logistic | **+5.1%** (vs climatology) | +2.7% … +8.0% | **met** | +2.6% [−3.2, +8.1], not met |
+| All-clear by 10:00 | logistic | **+12.2%** (vs Kaplan–Meier, last 60 days) | +1.8% … +24.7% | **met** | +9.2% [−1.0, +21.0], not met |
 
-- The test period was much more intense than training: an alert was active at 08:00 on **25.4%** of raion-mornings, against 12.2% in training. Against plain climatology the 07:00 model gains +21.9% and the 20:00 model +4.5%.
+- **Why there are two sets of numbers.** After the test, an independent code audit (OpenAI Codex, see [below](#independent-audit)) found data bugs that touched the test labels:
+  - multi-section posts were misread;
+  - censored all-clears were scored as "cleared";
+  - alert times were floored to the minute.
+
+  The fixes changed data and labels, not models or thresholds. Both runs are reported. The first run is in [results/archive_before_audit/](results/archive_before_audit/) and in git history.
+- **The test period was more intense than training:** an alert was active at 08:00 on **23.2%** of raion-mornings, against ~12% in training. Against plain climatology, the 07:00 model gains +15.3% and the 20:00 model +5.1%.
 - **Gradient boosting lost to logistic regression** on validation and on test, so the simpler model is reported.
-- The all-clear model scored +29% on validation but only +9% (not significant) on test. **The yellow/red reform changed how alerts end** (voice-only all-clear from 18 Sep), and a model trained before it degrades.
-- **Air Force threat posts did not help.** "How many Air Force posts mentioned your oblast in the last 1–3 h" improved validation by less than one standard error, so by the registered 1-SE rule it was dropped. The two strongest public competitors found the same about Telegram text for alert onset.
+- **The all-clear model fell from +29% on validation to +12% on test.** The yellow/red reform changed how alerts end (voice-only all-clear from 18 Sep).
+- **Air Force threat posts** ("how many Air Force posts mentioned your oblast in the last 1–3 h"): no help for the alert-at-08:00 models (below 1 SE, dropped). For the all-clear model they pass the 1-SE rule on validation by a small margin (gain 0.0022, SE 0.0017), so they are used there.
 
 ### All-clear by alert colour (since 6 Sep)
 
-If an alert is on at 08:00, this is the chance of the all-clear by each time (Kaplan–Meier, 855 alerts; [levels_clear_by_time.csv](results/levels_clear_by_time.csv)):
+If an alert is on at 08:00, this is the chance of the all-clear by each time (Kaplan–Meier, 825 alerts; [levels_clear_by_time.csv](results/levels_clear_by_time.csv)):
 
 | alert at 08:00 | already running | by 09:00 | **by 10:00** | by 11:00 | by 12:00 |
 |---|---|---|---|---|---|
-| yellow | < 30 min | 64% | **77%** | 85% | 92% |
-| yellow | 30 min – 2 h | 48% | **61%** | 76% | 82% |
-| yellow | > 2 h | 36% | **48%** | 63% | 65% |
-| red | < 30 min | 52% | **65%** | 83% | 89% |
-| red | 30 min – 2 h | 43% | **59%** | 80% | 82% |
-| red | > 2 h | 13% | **24%** | 33% | 37% |
+| yellow | < 30 min | 65% | **78%** | 86% | 92% |
+| yellow | 30 min – 2 h | 49% | **62%** | 78% | 83% |
+| yellow | > 2 h | 37% | **48%** | 61% | 64% |
+| red | < 30 min | 66% | **78%** | 91% | 93% |
+| red | 30 min – 2 h | 60% | **71%** | 82% | 82% |
+| red | > 2 h | 19% | **24%** | 29% | 31% |
 
-The level used is the one **in force at 08:00**, not the maximum over the alert: an alert that turned red at 09:00 was not known to be red at 08:00. Fitted only on earlier days, the colour improves the all-clear forecast by +5.2% Brier skill (407 weekday alerts from 21 Sep).
+The level used is the one **in force at 08:00**, not the maximum over the alert: an alert that turned red at 09:00 was not known to be red at 08:00.
+- **The audit changed this table.** The misread multi-section posts had inflated the red rows: 296 → 209 red alerts.
+- **What the colour adds as a feature is small:** +1.1% Brier skill when fitted only on earlier days (381 weekday alerts from 21 Sep), down from +5.2% before the fixes. What matters is how long the alert has already run: a red alert past 2 h clears by 10:00 in only 24% of cases.
 
 ![levels](figures/levels_clear_curves.png)
 
@@ -125,60 +131,72 @@ The level used is the one **in force at 08:00**, not the maximum over the alert:
 
 | Strategy | In-person hours / day | Limbo min / day | Fully remote days |
 |---|---|---|---|
-| A · status quo, control point 10:00 | 5.95 | 19.5 | 11.7% |
+| A · status quo, control point 10:00 | 6.10 | 16.8 | 9.7% |
 | B · plan a remote day at 20:00 | = A: never triggered | | |
-| C · call the day at 08:00 with M2 | 5.93 | 16.7 | 12.2% |
-| **D · per-raion control point** | **6.06** | 24.4 | **8.4%** |
-| Oracle (knows the all-clear time) | 5.95 | 5.5 | 11.7% |
+| C · call the day at 08:00 with M2 | 6.08 | 14.5 | 10.1% |
+| **D · per-raion control point** | **6.19** | 20.8 | **7.1%** |
+| Oracle (knows the all-clear time) | 6.10 | 5.2 | 9.7% |
 
 - **Planning a remote day the evening before never pays off.** On validation its value rises with the threshold until it stops firing: a wrongly cancelled school day costs more than the uncertainty it removes. The evening forecast is information for parents, not a trigger.
-- **The biggest lever is the control point.** Choosing it per raion from history (D) gives more in-person hours than the status quo, at the price of a few more minutes of waiting.
-- **The 08:00 call (C) cuts limbo** but not in-person hours, because the all-clear model is not sharp enough on the new regime.
+- **The biggest lever is the control point.** Choosing it per raion from history (D) gives more in-person hours and fewer fully remote days than the status quo, at the price of a few more minutes of waiting.
+- **The 08:00 call (C) cuts limbo** but not in-person hours.
 
 ### The price of alerts for schools
 
 From [results/cost_summary.json](results/cost_summary.json):
 
-- **Zoning dividend.** 15.0% of raion school mornings (Jan–May and Sep–Oct 2026) started under alert. If every alert covered the whole oblast, it would be 29.4%: raion-level alerts **saved 1 934 school mornings**.
-- **Yellow vs red.** Since 8 Sep, yellow (drone) alerts took **14.0%** of weekday school hours (08:00–15:00) and red **12.0%**. Under КМУ №1092 businesses with shelters may work during yellow, but schools shelter at both levels. Yellow alerts are where school time is lost relative to the rest of the economy.
-- **Control point trade-off.** Across 65 mid-intensity raions, moving the control point from 09:00 to 12:00 cuts fully remote days from 10.6% to 4.1% and raises waiting from 9 to 21 minutes a day.
+- **Zoning dividend.** 14.5% of raion school mornings (Jan–May and Sep–Oct 2026) started under alert. If every alert covered the whole oblast, it would be 28.7%: raion-level alerts **saved 1 910 school mornings**.
+- **Yellow vs red.** Since 8 Sep, yellow (drone) alerts took **14.9%** of weekday school hours (08:00–15:00) and red **8.9%**. Under КМУ №1092 businesses with shelters may work during yellow, but schools shelter at both levels. Yellow alerts are where school time is lost relative to the rest of the economy.
+- **Control point trade-off.** Across 62 mid-intensity raions, moving the control point from 09:00 to 12:00 cuts fully remote days from 10.4% to 4.0% and raises waiting from 9 to 21 minutes a day.
 
 ![control point](figures/cost_control_point.png)
 
 ## Live test: Monday 12 Oct 2026
 
-The forecast for this morning was committed **at 00:40, before 08:00** ([brief](results/live/brief_2026-10-12_2000.md)). A 07:00 update and the checks at 08:00 and 10:00 follow: see [results/live/](results/live/).
+The forecast for this morning was committed **at 00:40, before 08:00** ([brief](results/live/brief_2026-10-12_2000.md)). The 07:00 update was committed at 07:05, and the checks ran at 08:07 and 10:07 ([results/live/](results/live/)).
 
 | | Forecast issued 20:00 (committed 00:40) | Forecast issued 07:00 (committed 07:05) |
 |---|---|---|
-| Alert at 08:00 | 43 of 104 units (41%); mean forecast 28% | same outcome; mean forecast 28% |
-| Brier, alert at 08:00 | 0.192 vs climatology 0.209 (**+8.5%**) | 0.161 vs 0.209 (**+23%**) |
+| Alert at 08:00 | 42 of 104 units (40%); mean forecast 28% | same outcome; mean forecast 28% |
+| Brier, alert at 08:00 | 0.187 vs climatology 0.202 (**+7.4%**) | 0.164 vs 0.202 (**+18.5%**) |
 | Top-10 highest forecasts | 9 of 10 had an alert | 10 of 10 had an alert |
 
-**All-clear by 10:00** for the 43 units under alert at 08:00:
-- **33 got it (77%).** The brief's per-oblast curve said 65% on average, so it was too pessimistic. Its Brier of 0.160 still beats a single pooled rate (0.63 → 0.197).
-- **It missed in one region.** All five Kharkiv-oblast raions in the sample got 61% and none of them cleared. Zaporizkyi (29%) was right not to clear.
+The table is scored on the corrected alert data. The check run on the morning itself, before the parser fix, counted 43 units under alert and gave +8.5% and +23% ([archived](results/archive_before_audit/check_2026-10-12.md)). The forecasts themselves are unchanged.
 
-**What the MoE rule meant this morning:**
-- 61 units started in person;
-- 33 started remotely and switched to in-person lessons after the all-clear plus ~60 min;
-- 10 stayed remote all day: Zaporizkyi, Synelnykivskyi, Okhtyrskyi, Shostkynskyi, Berdychivskyi and five Kharkiv-oblast raions.
+**All-clear by 10:00** for the 42 units under alert at 08:00:
+- **33 got it (79%).** The brief's per-oblast curve said 65% on average, so it was too pessimistic.
+- **It missed in one region.** All five Kharkiv-oblast raions got 61%, and none of them cleared. Zaporizkyi (29%) was right not to clear.
 
 One morning is a noisy sample: it agrees with the test results but proves nothing by itself.
 
+## Independent audit
+
+After the test, OpenAI Codex audited the repository against [docs/codex-audit-prompt.md](docs/codex-audit-prompt.md). Every finding was first **reproduced by hand** before fixing; each fix has a regression test.
+
+| Finding | Effect | Fix |
+|---|---|---|
+| Multi-section posts parsed as one event (752 posts) | starts recorded as all-clears; some all-clears lost | parse each section ([parse_signal.py](src/airalerts/parse_signal.py)); real post 615287 as a test |
+| Times floored to the minute | an alert starting 07:00:40 was "seen" at 07:00:00 | sub-minute precision |
+| Censored all-clears scored as "cleared" (2 of 766 test rows) | slightly optimistic M2 labels | unknown outcomes dropped; 24 h-capped alerts = not cleared |
+| KM baseline used all training days, not the registered 60 | baseline differed from PREREG | last 60 days |
+| Alerts crossing the source switch could vanish | possible missing alert on 28 Aug | intervals clipped at the switch |
+| Clean checkout chose a different feature set | results not reproducible without local files | Air Force snapshot committed; `reproduce.sh` checks results against the committed ones |
+| Bot: SQLite write locks, lost messages on network errors, 19:45 preparation "seeing" 20:00, forged `rm:0` / `cp:²`, no global rate limit, wrong city ranking (Чернігів → Чернівецький) | bot reliability and safety | fixed, with tests; 40 largest cities resolve correctly |
+
+The truncation test was also extended to every feature at every issue time. A mutation test proves it catches a one-hour peek.
+
 ## After the registered test: fixes, each still checked out of sample
 
-These were designed after seeing the test and the live morning, so they are reported apart from the registered results. Each forecast still uses only days before the forecast day. They are logged in [PREREG.md](PREREG.md), items 6–8.
+These were designed after seeing the test and the live morning, so they are reported apart from the registered results. Each forecast still uses only days before the forecast day. They are logged in [PREREG.md](PREREG.md), items 6–10. The numbers are on the corrected data.
 
 | Problem found | Fix | Check |
 |---|---|---|
-| The brief gave every raion of an oblast the same all-clear chance (all five Kharkiv raions got 61% on 12 Oct; none cleared) | All-clear **per raion**, refitted every day on the last 42 days. A raion with few alerts borrows from its oblast ([clearance.py](src/airalerts/clearance.py)) | Rolling, weekdays 15 Sep – 12 Oct, 520 alerts at 08:00. Evening version: **+6.6%** Brier skill vs the per-oblast curve [+1.8, +11.4] |
-| The registered all-clear model was trained before the yellow/red reform and failed on test | The 08:00 version uses the **level in force at 08:00** and the time already elapsed, on post-reform data | **+27.6%** [+20.4, +32.5]. It now gives the brief's 08:00 update per raion: "wait for the control point" or "call the remote day now" |
+| The brief gave every raion of an oblast the same all-clear chance (all five Kharkiv raions got 61% on 12 Oct; none cleared) | All-clear **per raion**, refitted every day on the last 42 days. A raion with few alerts borrows from its oblast ([clearance.py](src/airalerts/clearance.py)) | Rolling, weekdays 15 Sep – 12 Oct, 470 alerts at 08:00. Evening version: +5.0% vs the per-oblast curve [−1.5, +13.3], **not significant** (it was +6.6% before the fixes) |
+| The registered all-clear model was trained before the yellow/red reform | The 08:00 version uses the **level in force at 08:00** and the time already elapsed, on post-reform data | **+26.3%** [+14.8, +33.1]. It now gives the brief's 08:00 update per raion: "wait for the control point" or "call the remote day now" |
 | Occupied raions were a hand-made list | Share of each raion's area occupied on 31 Aug 2026, from the [DeepState map history](https://github.com/cyterat/deepstate-map-data) and [OPORA raion boundaries](https://github.com/OPORA/map_2020) ([geo.py](src/airalerts/geo.py)) | Selects exactly the hand-listed raions; a test keeps them in agreement |
-| Full reproduction needed ~1.5 h of Telegram scraping | Parsed alerts committed as a 0.5 MB snapshot; `scripts/reproduce.sh` | **1 min 27 s** from a fresh clone, identical numbers |
-| Would a later evening forecast (21:30, 22:00) or neighbouring raions help? | Tested on validation ([experiments.py](src/airalerts/experiments.py)) | No consistent gain: 22:00 better on August, worse on test; neighbours +0.1–0.4%. Kept the simpler model |
-| Can news predict alerts? Keyword watcher on Lachen (8 570 posts) + Air Force | [events.py](src/airalerts/events.py): mass-attack warnings, truce, retaliation threats | Warnings precede a mass night 1.5× more often but cover only 17% of them, and add nothing to the 20:00 model. After truce news, alerts fell in 6 of 7 cases (n too small to claim). News fits as a banner, not as a feature |
-| Did Air Force posts fail only because they were pooled? | Re-checked on new alerts only (no alert at 07:00) | Still no gain (Brier 0.05257 vs 0.05251). Alerts are declared from the same radar picture, so the posts add nothing new by 07:00 |
+| Full reproduction needed ~1.5 h of Telegram scraping | Parsed alerts and Air Force threat posts committed as snapshots; `scripts/reproduce.sh` | **2 min 18 s** from a fresh clone; it ends with "results match the committed ones" |
+| Would a later evening forecast (21:30, 22:00) or neighbouring raions help? | Tested on validation ([experiments.py](src/airalerts/experiments.py)) | No: neither 21:30/22:00 nor neighbours beat the 20:00 base model on validation. Kept the simpler model |
+| Can news predict alerts? Keyword watcher on Lachen (8 570 posts) + Air Force | [events.py](src/airalerts/events.py): mass-attack warnings, truce, retaliation threats | Warnings precede a mass night 1.5× more often but cover only 17% of them, and add nothing meaningful to the 20:00 model (gain 1e-5). After truce news, alerts fell in 5 of 7 cases (n too small to claim). News fits as a banner, not as a feature |
 
 ## Evening brief
 
