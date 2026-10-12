@@ -3,7 +3,7 @@
 Design rules (docs/research/10-bot-ux.md, checked against core.telegram.org):
 - a button label fits a phone: ≤ ~14 characters when two share a row, otherwise one per row;
 - the verdict comes first, details go into an expandable quote;
-- risk = word + weather shape (☀️ ⛅ 🌧), never colour alone; red/yellow stay reserved for real alert levels;
+- risk = word + alarm-bell scale (🔕 🔔 🚨), never colour alone; red/yellow stay reserved for real alert levels;
 - button `style` only "primary" (blue) / "success" (green) for the main action, never "danger".
 """
 
@@ -106,7 +106,7 @@ def settings_keyboard(sub: dict):
         [(f"🔔 Контрольна точка · {sub['cp']:02d}:00", "s:cp")],
         [(f"🌙 Прогноз о · {sub['evening']}", "s:ev")],
         [(f"🎚 Поради · {STYLE[sub['style']][0].split()[1]}", "s:st")],
-        [(f"☀️ Ранок · {m}", "s:m")],
+        [(f"🌅 Ранок · {m}", "s:m")],
         [(f"📰 Новини · {'так' if sub['banner'] else 'ні'}", "s:bn")],
         [("⏸ Пауза", "s:pause")],
     ])
@@ -119,7 +119,7 @@ SCREENS = {
            lambda s: [[(("✓ " if s["evening"] == t else "") + t, f"ev:{t}") for t in ("20:00", "20:30", "21:00")]]),
     "st": ("🎚 <b>Як охоче радити дистанційний ранок</b>\nБаланс: пороги, перевірені на даних.",
            lambda s: [[(("✓ " if s["style"] == k else "") + v[0], f"st:{k}")] for k, v in STYLE.items()]),
-    "m": ("☀️ <b>Ранкове повідомлення о 08:05</b>",
+    "m": ("🌅 <b>Ранкове повідомлення о 08:05</b>",
           lambda s: [[(("✓ " if s["morning"] == "alert" else "") + "🔔 При тривозі", "m:alert"),
                       (("✓ " if s["morning"] == "always" else "") + "📅 Щоранку", "m:always")]]),
     "bn": ("📰 <b>Банер новин</b>\nПро перемир'я чи попередження про масовану атаку. Цифри прогнозу він не змінює.",
@@ -148,11 +148,13 @@ def pause_keyboard():
 # ---------- forecasts ----------
 
 def mood(p_alert: float) -> str:
+    """Risk of an alert at 08:00 as an alarm-bell scale: three different shapes, so it reads without colour,
+    and red/yellow stay reserved for the real alert levels."""
     if p_alert < 0.2:
-        return "☀️ Спокійний ранок"
+        return "🔕 Низький ризик"
     if p_alert < 0.5:
-        return "⛅ Можлива тривога"
-    return "🌧 Тривожний ранок"
+        return "🔔 Середній ризик"
+    return "🚨 Високий ризик"
 
 
 def bar(p: float, n: int = 10) -> str:
@@ -177,7 +179,7 @@ def _evening_block(unit: str, row: dict, cp: int, style: str) -> str:
 
 def _morning_block(unit: str, row: dict | None, cp: int, style: str) -> str:
     if row is None:
-        return f"<b>{escape(short(unit))}</b>\n☀️ Тривоги немає: очний день за розкладом."
+        return f"<b>{escape(short(unit))}</b>\n🔕 Тривоги немає: очний день за розкладом."
     p = row[f"p_clear_{cp}"]
     advice = "оголосіть дистанційний день зараз" if p < STYLE[style][2] else f"чекайте контрольної точки {cp:02d}:00"
     return (f"<b>{escape(short(unit))}</b>\n{LEVEL.get(row['level'], 'Тривога')} триває {row['elapsed_min']:.0f} хв\n"
