@@ -76,3 +76,4 @@ Everything below was designed **after** the test results were seen. It is report
      - evening version: BSS +0.066 [+0.018, +0.114];
      - 08:00 version (level + elapsed): BSS +0.276 [+0.204, +0.325].
    - Both now feed the brief.
+7. **Occupied raions from the DeepState map instead of a hand list** (`geo.py`): raions with >50% of their area occupied on 31 Aug 2026 (map history from cyterat/deepstate-map-data, raion boundaries from OPORA/map_2020). Outside Donetsk and Luhansk oblasts it selects exactly the seven raions of the hand list, so units and all results are unchanged; a test keeps the two in agreement.

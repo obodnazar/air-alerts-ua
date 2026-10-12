@@ -79,3 +79,19 @@ def test_guard_trips_on_a_perfect_score():
     with pytest.raises(M.LeakageGuard):
         M.guard(y, y.astype(float), "planted")
     M.guard(y, np.full(100, 0.5), "honest")  # does not raise
+
+
+def test_occupied_rule_from_map_matches_hand_list():
+    from pathlib import Path
+
+    from airalerts.data import EXCLUDED_OBLASTS, OCCUPIED  # noqa: F401
+
+    share = Path("data/snapshot/occupied_share.csv")
+    if not share.exists():
+        pytest.skip("snapshot missing")
+    occ = pd.read_csv(share)
+    zoned_oblast_raions = {"Бердянський район", "Мелітопольський район", "Василівський район", "Пологівський район",
+                           "Генічеський район", "Скадовський район", "Каховський район", "Херсонський район",
+                           "Бериславський район", "Запорізький район", "Куп'янський район"}
+    from_map = set(occ[(occ.occupied_share > 0.5) & occ.unit.isin(zoned_oblast_raions)].unit)
+    assert from_map == OCCUPIED

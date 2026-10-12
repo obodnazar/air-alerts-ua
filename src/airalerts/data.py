@@ -28,7 +28,8 @@ MAX_EPISODE = pd.Timedelta(hours=24)
 RENAMES = {"Красноградський район": "Берестинський район", "Володимир-Волинський район": "Володимирський район",
            "Червоноградський район": "Шептицький район"}
 # Raions wholly or mostly under occupation: their alert series is identical to neighbours' and no schools
-# there follow Ukrainian MoE rules. Donetsk oblast is excluded as a whole: it was left out of raion-level
+# there follow Ukrainian MoE rules. Since 12 Oct the list comes from the DeepState map (geo.py, >50% of the
+# raion's area occupied on 31 Aug 2026); this hand-made list is kept as a cross-check in the tests. Donetsk oblast is excluded as a whole: it was left out of raion-level
 # zoning (Dec 2025) and is under alert almost permanently. This is an assumption, stated in PREREG.md.
 OCCUPIED = {"Бердянський район", "Мелітопольський район", "Василівський район", "Пологівський район",
             "Генічеський район", "Скадовський район", "Каховський район"}
@@ -192,5 +193,10 @@ def eligible_units(store: Store, until: pd.Timestamp = SWITCH) -> list[str]:
     """
     r = store.raw
     own = r[(r.source == "official") & (r.scope == "unit") & (r.started_at >= REGIME_START) & (r.started_at < until)]
-    keep = set(own.unit.dropna()) - OCCUPIED
+    occupied = OCCUPIED
+    share = Path("data/snapshot/occupied_share.csv")  # DeepState map as of 31 Aug 2026, see geo.py
+    if share.exists():
+        occ = pd.read_csv(share)
+        occupied = set(occ[occ.occupied_share > 0.5].unit)
+    keep = set(own.unit.dropna()) - occupied
     return [u for u in store.units if u in keep and store.oblast_of[u] not in EXCLUDED_OBLASTS]
