@@ -183,6 +183,15 @@ These were designed after seeing the test and the live morning, so they are repo
 
 `python -m airalerts.brief --day 2026-10-13` writes one line per raion: the chance of an alert at 08:00, the chance of an all-clear by 10:00 (per raion), the chance of a fully remote day, and plain advice. `--issue 08:00` gives the morning update: for each raion under alert, the chance of an all-clear by 10:00 given the alert's colour and how long it has run, with "wait" or "call the remote day now". The text comes from a template, with no LLM: every number in it comes straight from the models.
 
+## Telegram bot
+
+[bot.py](src/airalerts/bot.py) sends the same template brief for one raion, in plain Python over the Telegram Bot API, with no LLM:
+- `/raion Бучанський` subscribes to a raion;
+- `/now` returns tomorrow's forecast;
+- `send --issue 20:00` and `send --issue 08:00` push the evening brief and the morning update to subscribers. Schedule them with cron or GitHub Actions.
+
+The token comes from @BotFather and is read from the `TELEGRAM_BOT_TOKEN` environment variable; it is never stored in the repo. `--dry-run` prints the messages instead of sending them.
+
 ## Limitations
 
 - **One test window of 29 weekdays, in an unusually intense period.** The intervals above reflect that.
