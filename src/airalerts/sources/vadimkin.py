@@ -14,6 +14,13 @@ import argparse
 import urllib.request
 from pathlib import Path
 
+try:  # use the OS certificate store (python.org builds on macOS ship without one)
+    import truststore
+
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 BASE = "https://raw.githubusercontent.com/Vadimkin/ukrainian-air-raid-sirens-dataset/main/datasets/"
 FILES = ["official_data_uk.csv", "volunteer_data_en.csv"]
 
