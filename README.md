@@ -149,7 +149,22 @@ From [results/cost_summary.json](results/cost_summary.json):
 
 The forecast for this morning was committed **at 00:40, before 08:00** ([brief](results/live/brief_2026-10-12_2000.md)). A 07:00 update and the checks at 08:00 and 10:00 follow: see [results/live/](results/live/).
 
-*(to be filled after 10:07)*
+| | Forecast issued 20:00 (committed 00:40) | Forecast issued 07:00 (committed 07:05) |
+|---|---|---|
+| Alert at 08:00 | 43 of 104 units (41%); mean forecast 28% | same outcome; mean forecast 28% |
+| Brier, alert at 08:00 | 0.192 vs climatology 0.209 (**+8.5%**) | 0.161 vs 0.209 (**+23%**) |
+| Top-10 highest forecasts | 9 of 10 had an alert | 10 of 10 had an alert |
+
+**All-clear by 10:00** for the 43 units under alert at 08:00:
+- **33 got it (77%).** The brief's per-oblast curve said 65% on average, so it was too pessimistic. Its Brier of 0.160 still beats a single pooled rate (0.63 → 0.197).
+- **It missed in one region.** All five Kharkiv-oblast raions in the sample got 61% and none of them cleared. Zaporizkyi (29%) was right not to clear.
+
+**What the MoE rule meant this morning:**
+- 61 units started in person;
+- 33 started remotely and switched to in-person lessons after the all-clear plus ~60 min;
+- 10 stayed remote all day: Zaporizkyi, Synelnykivskyi, Okhtyrskyi, Shostkynskyi, Berdychivskyi and five Kharkiv-oblast raions.
+
+One morning is a noisy sample: it agrees with the test results but proves nothing by itself.
 
 ## Evening brief
 
