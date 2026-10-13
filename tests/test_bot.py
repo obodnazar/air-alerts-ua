@@ -391,3 +391,15 @@ def test_publisher_early_wait_on_dst_days(monkeypatch):
     for t in ["2026-10-25 19:41", "2026-10-25 07:41", "2027-03-28 19:41"]:  # 25-hour and 23-hour days
         publish.wait_for_issue(pd.Timestamp(t, tz="Europe/Kyiv"))
     assert slept == [19 * 60 + 20] * 3
+
+
+def test_extras_about_twice_a_day():
+    from airalerts.botapp.publish import extras_due
+
+    k = lambda s: pd.Timestamp(s, tz="Europe/Kyiv")  # noqa: E731
+    assert extras_due(k("2026-10-14 20:01"), 200, False)          # the run that published the school forecast
+    assert not extras_due(k("2026-10-14 20:41"), 409, False)      # its backup
+    assert not extras_due(k("2026-10-14 20:01"), 500, False)      # failed forecast: the run fails anyway
+    assert extras_due(k("2026-10-17 08:01"), None, False)         # Saturday, early run
+    assert not extras_due(k("2026-10-17 09:02"), None, False)     # Saturday, backup
+    assert extras_due(k("2026-10-17 15:00"), None, True)          # manual

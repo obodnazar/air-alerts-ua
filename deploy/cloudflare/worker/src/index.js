@@ -13,6 +13,8 @@ const LATE = 90;        // minutes a slot may still go out after its time
 const TG_BUDGET = 40;   // Workers Free: 50 external subrequests per invocation, shared by all slots of one run
                         // and the live scrape (≤ PAGES = 5 fetches): 45 at most
 const CLAIM = 200;      // rows claimed per slot and run; those not sent (budget spent) go back to pending
+const SETTLE_EVERY = 10;          // write delivery progress every 10 sends (at most 4 extra D1 queries per run)
+const TIME_BUDGET_MS = 20000;     // stop sending after 20 s; waitUntil after /ingest is cut ~30 s after the response
 const COMMANDS = [{ command: "now", description: "🌙 прогноз на найближчий шкільний день" },
   { command: "settings", description: "⚙️ райони, контрольна точка, час, стиль порад" },
   { command: "hours", description: "🕐 ризик тривоги на обрану годину" }, { command: "recent", description: "📜 останні тривоги" },
@@ -96,6 +98,8 @@ export function invalidAlerts(b, units = new Set(catalog.units)) {
   if (!Number.isInteger(b.max_post_id) || b.max_post_id <= 0) return "max_post_id";
   if (!isNum(b.data_end, 1.7e12, 4e12) || !isNum(b.since, 1.7e12, b.data_end)) return "data_end/since";
   if (!Array.isArray(b.alerts) || b.alerts.length > 20000) return "alerts";
+  // D1 binds one string of at most 2 000 000 bytes; the history goes in as one JSON parameter (audit round 4)
+  if (new TextEncoder().encode(JSON.stringify(b.alerts)).length > 1_500_000) return "alerts too large";
   for (const a of b.alerts) {
     if (!Array.isArray(a) || a.length !== 5 || !units.has(a[0]) || !Number.isInteger(a[1]) || a[1] < b.since || a[1] > b.data_end
       || !(a[2] === null || (Number.isInteger(a[2]) && a[2] >= a[1] && a[2] <= b.data_end)) || !LEVELS.has(a[3]) || !LEVELS.has(a[4])) {
@@ -135,19 +139,22 @@ export async function deliver(store, tg, { kind, day, slot }, budget = { calls: 
     const units = new Set(subs.flatMap((s) => s.units));
     for (const u of units) live[u] = liveState(meta, byUnit[u], now);
   }
-  const outcome = {};
-  let sent = 0;
+  const outcome = {}, started = Date.now();
+  let sent = 0, done = {};
   for (const sub of subs) {
-    const text = kind === "evening" ? ui.eveningMessage(sub, rows, day, f.banner) : ui.morningMessage(sub, rows, day, f.banner, live);
+    const text = kind === "evening" ? ui.eveningMessage(sub, rows, day, f.banner)
+      : ui.morningMessage(sub, rows, day, f.banner, live);
     if (!text) { outcome[sub.chat_id] = "skipped"; continue; } // e.g. morning without an alert in their raions
-    if (budget.calls <= 0 || budget.stop) continue;           // back to pending
+    // budget: Telegram calls shared by the run, and time (waitUntil after /ingest has ~30 s); the rest stays pending
+    if (budget.calls <= 0 || budget.stop || Date.now() - started > TIME_BUDGET_MS) continue;
     budget.calls--;
-    try { await tg.send(sub.chat_id, text); outcome[sub.chat_id] = "sent"; sent++; }
+    try { await tg.send(sub.chat_id, text); outcome[sub.chat_id] = done[sub.chat_id] = "sent"; sent++; }
     catch (e) {
-      if (e instanceof Blocked) outcome[sub.chat_id] = "blocked";
+      if (e instanceof Blocked) outcome[sub.chat_id] = done[sub.chat_id] = "blocked";
       else if (e instanceof RateLimited) budget.stop = true;  // Telegram asks us to slow down: stop the run
       // network or 5xx: stays pending, retried on the next tick
     }
+    if (Object.keys(done).length >= SETTLE_EVERY) { await store.settle(token, done); done = {}; } // progress survives a cut
   }
   await store.finish(token, outcome);
   return { sent, claimed: subs.length };
@@ -230,7 +237,20 @@ export default {
         return Response.json({ ok: false, error: safe }, { status: 502 });
       }
     }
-    if (url.pathname === "/health") return new Response("ok");
+    if (url.pathname === "/health") {
+      // what monitoring needs, at ~3 row reads: is the database readable, how old is the live scrape and the last ingest
+      try {
+        const store = new Store(env.DB), now = Date.now();
+        const [meta, last] = await Promise.all([store.liveMeta(),
+          env.DB.prepare("SELECT max(received) AS r FROM forecasts").first()]);
+        const liveAgeMin = meta.ok ? Math.round((now - meta.ok) / 60000) : null;
+        const ingestAgeH = last?.r ? Math.round((now - Date.parse(last.r)) / 3600000) : null;
+        const ok = liveAgeMin !== null && liveAgeMin <= 30 && ingestAgeH !== null && ingestAgeH <= 26; // hourly parameters arrive every day, weekends too
+        return Response.json({ ok, db: true, live_age_min: liveAgeMin, ingest_age_h: ingestAgeH }, { status: ok ? 200 : 503 });
+      } catch (e) {
+        return Response.json({ ok: false, db: false, error: String(e?.message || e).slice(0, 120) }, { status: 503 });
+      }
+    }
     return new Response("not found", { status: 404 });
   },
 
@@ -242,5 +262,7 @@ export default {
       if (r.posts || r.gap) console.log(JSON.stringify({ scrape: r }));
     } catch (e) { console.log("scrape failed", String(e?.message || e).slice(0, 200)); } // the bot then says "no fresh data"
     await runDue(env, event.scheduledTime);
+    const k = kyivNow(new Date(event.scheduledTime));
+    if (k.hhmm >= "03:00" && k.hhmm < "03:05") await new Store(env.DB).cleanup(k.day).catch((e) => console.log("cleanup failed", e.message));
   },
 };

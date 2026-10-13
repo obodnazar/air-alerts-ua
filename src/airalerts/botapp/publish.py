@@ -69,6 +69,18 @@ def in_window(now: pd.Timestamp) -> bool:
     return "20:00" <= hhmm <= "21:30" or "08:00" <= hhmm <= "09:30"
 
 
+def extras_due(now: pd.Timestamp, status: int | None, force: bool) -> bool:
+    """Send the hourly parameters and the 7-day alert history about twice a day, not on every run (audit round 4: six
+    histories a day cost ~10 000 D1 writes each). With a school forecast: only the run that published it first (200).
+    Weekends: only runs in the first 40 minutes of a window (the early one, not the backups)."""
+    if force:
+        return True
+    if status is not None:
+        return status == 200
+    hhmm = now.strftime("%H:%M")
+    return "20:00" <= hhmm <= "20:40" or "08:00" <= hhmm <= "08:40"
+
+
 def forced(kind: str, day: str) -> tuple[str, str]:
     """Validate a manual --force; the workflow passes it through, so it is checked here, not trusted."""
     if kind not in ("evening", "morning"):
@@ -163,7 +175,7 @@ def main() -> None:
         return
     seed_history()
     refresh()
-    failed = None
+    failed, status = [], None
     if job:
         kind, day = job
         frame = forecasts.evening(day) if kind == "evening" else forecasts.morning(day)
@@ -174,16 +186,22 @@ def main() -> None:
         if status == 409:
             print(kind, day, "-> already published earlier today; kept the first version")
         elif status != 200:
-            failed = f"{kind} {day} -> {status} {text}"
+            failed.append(f"{kind} {day} -> {status} {text}")
         else:
             print(kind, day, "->", status, text)
-    try:  # best effort, after the school forecast and whatever happened to it
-        for body in extras(pd.Timestamp.now(tz="Europe/Kyiv")):
-            print(body["kind"], "->", *post(body))
-    except Exception as e:  # noqa: BLE001 - never block the school forecast on the hourly extras
-        print("extras failed:", type(e).__name__, str(e)[:200])
-    if failed:
-        raise SystemExit(failed)
+    if extras_due(pd.Timestamp.now(tz="Europe/Kyiv"), status, bool(a.force)):
+        try:  # after the school forecast and whatever happened to it
+            for body in extras(pd.Timestamp.now(tz="Europe/Kyiv")):
+                code, text = post(body)
+                print(body["kind"], "->", code, text)
+                if code != 200:
+                    failed.append(f"{body['kind']} -> {code} {text}")
+        except Exception as e:  # noqa: BLE001 - reported below, after the school forecast went out
+            failed.append(f"extras: {type(e).__name__} {str(e)[:200]}")
+    else:
+        print("extras: skipped (sent by the first run of this window)")
+    if failed:  # a red run is the alert: GitHub e-mails the owner
+        raise SystemExit("; ".join(failed))
 
 
 if __name__ == "__main__":

@@ -745,8 +745,10 @@ test("13 Oct: healing from a 4 000-alert history reads ~N + M rows, not N×M (D1
   const ms = performance.now() - t;
   assert.ok(ms < 300, `applySeed took ${ms.toFixed(0)} ms: quadratic again?`);
   assert.equal((await store.db.raw.prepare("SELECT count(*) n FROM alerts").get()).n, 3900); // the 100 not in the history went
-  const plan = store.db.raw.prepare("EXPLAIN QUERY PLAN DELETE FROM alerts WHERE started >= 1 AND NOT EXISTS (SELECT 1 FROM seed_keys k WHERE k.unit = alerts.unit AND k.started = alerts.started)").all();
-  assert.ok(plan.some((r) => /SEARCH k USING .*INDEX/.test(r.detail)), JSON.stringify(plan));
+  const plan = (sql) => store.db.raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map((r) => r.detail).join(" | ");
+  assert.match(plan("SELECT unit, started FROM alerts WHERE started >= 1 AND started <= 2"), /USING .*INDEX alerts_started/);
+  assert.match(plan(`DELETE FROM alerts WHERE (unit, started) IN (SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]') FROM json_each('[]'))`),
+    /USING .*(INDEX|PRIMARY KEY)/);
 });
 
 test("database down: the user gets a short notice instead of silence", async () => {
@@ -763,4 +765,74 @@ test("database down: the user gets a short notice instead of silence", async () 
     assert.equal(sent.at(-1).chat_id, 7);
     assert.match(sent.at(-1).text, /тимчасово/);
   } finally { globalThis.fetch = real; }
+});
+
+// ---------- audit round 4 (Codex, 14 Oct): free-tier budgets ----------
+const writes = (store) => store.db.raw.prepare("SELECT total_changes() AS n").get().n;
+
+test("audit 4: a repeated history costs no writes; an unchanged one rewrites nothing; only real changes are written", async () => {
+  const store = new Store(fakeD1());
+  const t0 = Date.parse("2026-10-06T00:00:00Z");
+  const alerts = Array.from({ length: 2000 }, (_, i) => [catalog.units[i % 100], t0 + i * 60000, t0 + i * 60000 + 30000, "yellow", "yellow"]);
+  const seed = { max_post_id: 20, since: t0, data_end: t0 + 3000 * 60000, alerts };
+  await store.applySeed(seed, t0 + 3000 * 60000);
+  let w = writes(store);
+  assert.deepEqual(await store.applySeed(seed, t0 + 3000 * 60000), { rows: 2000, skipped: "identical" });
+  assert.equal(writes(store) - w, 0);
+  w = writes(store);
+  await store.applySeed({ ...seed, data_end: seed.data_end + 1 }, t0 + 3000 * 60000);   // same alerts, new run
+  assert.ok(writes(store) - w <= 5, `unchanged history wrote ${writes(store) - w} rows`);
+  w = writes(store);
+  const changed = alerts.map((a, i) => (i < 10 ? [a[0], a[1], a[2], "red", "red"] : a));
+  await store.applySeed({ ...seed, data_end: seed.data_end + 2, alerts: changed }, t0 + 3000 * 60000);
+  assert.ok(writes(store) - w <= 15, `10 changed alerts wrote ${writes(store) - w} rows`);
+});
+
+test("audit 4: outbox lookups by token use an index; old rows are cleaned up daily", async () => {
+  const store = new Store(fakeD1());
+  const plan = (sql) => store.db.raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map((r) => r.detail).join(" | ");
+  assert.match(plan("SELECT s.* FROM subs s JOIN outbox o ON o.chat_id=s.chat_id WHERE o.token='x'"), /outbox_token/);
+  assert.doesNotMatch(plan("UPDATE outbox SET state='sent' WHERE token='x'"), /SCAN outbox/);
+  await fill(store, 3);
+  await store.saveForecast("evening", "2026-09-20", { rows }); await store.saveForecast("evening", "2026-10-13", { rows });
+  for (const d of ["2026-10-01", "2026-10-11", "2026-10-13"]) await store.plan("evening", d, "20:00");
+  await store.cleanup("2026-10-14");
+  const days = store.db.raw.prepare("SELECT DISTINCT day FROM outbox ORDER BY day").all().map((r) => r.day);
+  assert.deepEqual(days, ["2026-10-11", "2026-10-13"]);
+  assert.equal(await store.forecast("evening", "2026-09-20"), null);
+  assert.ok(await store.forecast("evening", "2026-10-13"));
+});
+
+test("audit 4: the rate limit writes nothing to the database", async () => {
+  const store = new Store(fakeD1());
+  const w = writes(store);
+  for (let i = 0; i < 20; i++) await store.allowed(1, 1e12);
+  assert.equal(writes(store) - w, 0);
+});
+
+test("audit 4: delivery progress is written every 10 sends; a run cut short resends at most the last few", async () => {
+  const store = new Store(fakeD1());
+  await fill(store, 25);
+  await store.saveForecast("evening", "2026-10-13", { rows, banner: "" });
+  store.finish = async () => { throw new Error("isolate cut before finish()"); }; // e.g. waitUntil ran out
+  await assert.rejects(deliver(store, new FakeTG(), EV));
+  assert.equal(store.db.raw.prepare("SELECT count(*) n FROM outbox WHERE state='sent'").get().n, 20); // settled at 10 and 20
+  delete store.finish;
+  const again = await deliver(store, new FakeTG(), EV, undefined, Date.now() + 16 * 60000);     // after the lease
+  assert.equal(again.sent, 5);                                                 // at most SETTLE_EVERY - 1 + 1 duplicates
+});
+
+test("audit 4: /health reports the database and data ages; a too-large history is refused", async () => {
+  const env = { DB: fakeD1(), TELEGRAM_BOT_TOKEN: "x", WEBHOOK_SECRET: "w", INGEST_SECRET: "i" };
+  let res = await worker.fetch(new Request("https://x/health"), env);
+  assert.equal(res.status, 503);                                               // no scrape, no forecast yet
+  const store = new Store(env.DB);
+  await store.saveLive([], { last: 1, ok: Date.now(), gapTo: 0 });
+  await store.saveForecast("morning", "2026-10-13", { rows: [] });
+  res = await worker.fetch(new Request("https://x/health"), env);
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).db, true);
+  const big = { max_post_id: 1, since: 1.75e12, data_end: 1.76e12,
+    alerts: Array.from({ length: 19000 }, (_, i) => ["Білгород-Дністровський район", 1.75e12 + i, null, "yellow", "yellow"]) };
+  assert.equal(invalidAlerts(big), "alerts too large");
 });

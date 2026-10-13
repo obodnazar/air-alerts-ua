@@ -53,8 +53,14 @@ jobs:
           args=()
           if [ -n "$FORCE" ]; then read -r kind day rest <<< "$FORCE"; args=(--force "$kind" "$day"); fi
           PYTHONPATH=src python -m airalerts.botapp.publish "${args[@]}"
-      - name: keep scraped posts for the next run
+      - name: is the bot healthy (database readable, live scrape and forecasts fresh)?
         if: always()
+        env:
+          INGEST_URL: ${{ secrets.INGEST_URL }}
+        run: curl -fsS -A shkilnyi-ranok-publisher/1.0 "${INGEST_URL%/ingest}/health"   # 503 fails the run: GitHub e-mails the owner
+      - name: keep scraped posts for the next run
+        # only runs that refreshed the posts save a copy (each copy ~240 MB; GitHub keeps 10 GB per repo)
+        if: always() && hashFiles('data/interim/last_refresh') != ''
         uses: actions/cache/save@v4
         with:
           path: data/raw/telegram

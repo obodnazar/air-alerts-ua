@@ -14,7 +14,7 @@ class Stmt {
 export function fakeD1() {
   const db = new DatabaseSync(":memory:");
   db.exec(readFileSync(new URL("../schema.sql", import.meta.url), "utf8"));
-  const d1 = { queries: 0, raw: db,
+  const d1 = { queries: 0, raw: db, limits: { chat: new Map(), all: [] }, // a fresh rate-limit window per test database
     prepare: (sql) => { d1.queries++; return new Stmt(db, sql); },
     batch: async (stmts) => { // one synchronous transaction, as D1 runs a batch
       db.exec("BEGIN"); try { const r = stmts.map((s) => s.runSync()); db.exec("COMMIT"); return r; } catch (e) { db.exec("ROLLBACK"); throw e; } } };

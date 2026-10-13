@@ -5,8 +5,15 @@ export const ALLOWED = {
   style: new Set(["careful", "balanced", "bold"]), banner: new Set([0, 1]), active: new Set([0, 1]),
 };
 
+const LIMITS = { chat: new Map(), all: [] }; // shared by every Store in this isolate
+
+async function sha256(text) {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 export class Store {
-  constructor(db) { this.db = db; }
+  constructor(db, limits = db?.limits || LIMITS) { this.db = db; this.limits = limits; }
   q(sql, ...args) { return this.db.prepare(sql).bind(...args); }
 
   async units(chat) {
@@ -70,6 +77,22 @@ export class Store {
       ...(blocked.length ? [this.q("UPDATE subs SET active=0 WHERE chat_id IN (SELECT value FROM json_each(?))", JSON.stringify(blocked))] : []),
     ]);
   }
+  /** Mark finished rows now (every few sends), so a run cut short after Telegram accepted a message does not send it
+   *  again when the lease expires. Unlisted rows keep this run's claim until finish(). */
+  async settle(token, outcome) {
+    if (!Object.keys(outcome).length) return;
+    await this.q(`UPDATE outbox SET state=json_extract(?1, '$."' || chat_id || '"'), token=NULL, lease=0
+      WHERE token=?2 AND json_extract(?1, '$."' || chat_id || '"') IS NOT NULL`, JSON.stringify(outcome), token).run();
+  }
+  /** Daily: delivery rows older than 3 days and school forecasts older than 14 days go (tables stay bounded). */
+  async cleanup(today) {
+    const d = new Date(`${today}T12:00:00Z`);
+    const ago = (n) => new Date(d.getTime() - n * 86400000).toISOString().slice(0, 10);
+    await this.db.batch([
+      this.q("DELETE FROM outbox WHERE day < ?", ago(3)),
+      this.q("DELETE FROM forecasts WHERE kind IN ('evening', 'morning') AND day < ?", ago(14)),
+    ]);
+  }
   async pending(kind, day, slot) {
     return (await this.q("SELECT count(*) AS n FROM outbox WHERE kind=? AND day=? AND slot=? AND state='pending'", kind, day, slot).first()).n;
   }
@@ -131,33 +154,41 @@ export class Store {
    *  which is how it heals posts the Worker missed. An all-clear seen by either side wins (it is a fact); of two
    *  open rows of one raion only the earliest is kept (a later "start" was a level change seen without its start). */
   async applySeed(seed, now = Date.now()) {
-    const meta = await this.liveMeta();
-    const newer = seed.max_post_id >= meta.last ? 1 : 0;
     const rows = JSON.stringify(seed.alerts);
+    // the same history twice (summer: two runs per window) costs one read, not ~10 000 writes (audit round 4)
+    const hash = await sha256(rows + seed.since + seed.data_end);
+    const meta = await this.liveMeta();
+    if ((await this.kv("seed_hash")) === hash) return { rows: seed.alerts.length, skipped: "identical" };
+    const newer = seed.max_post_id >= meta.last ? 1 : 0;
+    // which stored alerts of the window the history does not have: read the window (M rows, via alerts_started)
+    // and diff here. 13 Oct: a correlated json_each scan read N×M ≈ 14 M rows; a staging table cost 2N writes.
+    const have = (await this.q("SELECT unit, started FROM alerts WHERE started >= ? AND started <= ?", seed.since, seed.data_end).all()).results;
+    const keep = new Set(seed.alerts.map((x) => `${x[0]}\u0000${x[1]}`));
+    const gone = have.filter((r) => !keep.has(`${r.unit}\u0000${r.started}`)).map((r) => [r.unit, r.started]);
     const rank = (x) => `CASE ${x} WHEN 'red' THEN 2 WHEN 'yellow' THEN 1 ELSE 0 END`;
     await this.db.batch([
-      // the seed's keys go to a keyed table first: comparing every alert with every json_each row read N×M rows
-      // (3 760 × 3 760 ≈ 14 M on 13 Oct) and spent D1's 5 M free daily reads in one call. Now it is ~N + M.
-      this.q("DELETE FROM seed_keys"),
-      this.q(`INSERT OR IGNORE INTO seed_keys SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]') FROM json_each(?)`, rows),
-      this.q(`DELETE FROM alerts WHERE started >= ?1 AND started <= ?2 AND NOT EXISTS (SELECT 1 FROM seed_keys k
-        WHERE k.unit = alerts.unit AND k.started = alerts.started)`, seed.since, seed.data_end),
+      ...(gone.length ? [this.q(`DELETE FROM alerts WHERE (unit, started) IN
+        (SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]') FROM json_each(?))`, JSON.stringify(gone))] : []),
+      // upsert that writes only rows that change (a WHERE on DO UPDATE): unchanged history costs reads, not writes
       this.q(`INSERT INTO alerts (unit, started, ended, level, max_level)
         SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]'), json_extract(value, '$[3]'),
           json_extract(value, '$[4]') FROM json_each(?1) WHERE true
         ON CONFLICT(unit, started) DO UPDATE SET ended=coalesce(alerts.ended, excluded.ended),
           level=CASE WHEN ?2 = 1 AND alerts.ended IS NULL THEN excluded.level ELSE alerts.level END,
-          max_level=CASE WHEN ${rank("excluded.max_level")} > ${rank("alerts.max_level")} THEN excluded.max_level ELSE alerts.max_level END`,
+          max_level=CASE WHEN ${rank("excluded.max_level")} > ${rank("alerts.max_level")} THEN excluded.max_level ELSE alerts.max_level END
+        WHERE (alerts.ended IS NULL AND excluded.ended IS NOT NULL)
+          OR (?2 = 1 AND alerts.ended IS NULL AND alerts.level IS NOT excluded.level)
+          OR ${rank("excluded.max_level")} > ${rank("alerts.max_level")}`,
       rows, newer),
       this.q(`DELETE FROM alerts WHERE ended IS NULL AND EXISTS (SELECT 1 FROM alerts b WHERE b.unit = alerts.unit
         AND b.ended IS NULL AND b.started < alerts.started)`),
       this.q("DELETE FROM alerts WHERE started < ?", now - 14 * 86400000),
       this.q(`INSERT INTO state (key, value) SELECT key, value FROM json_each(?) WHERE true
         ON CONFLICT(key) DO UPDATE SET value=excluded.value`, JSON.stringify({
-        live_last_id: String(Math.max(meta.last, seed.max_post_id)),
+        live_last_id: String(Math.max(meta.last, seed.max_post_id)), seed_hash: hash,
         live_gap_to: String(meta.gapTo && seed.max_post_id >= meta.gapTo ? 0 : meta.gapTo) })),
     ]);
-    return { rows: seed.alerts.length, newer: !!newer };
+    return { rows: seed.alerts.length, removed: gone.length, newer: !!newer };
   }
   /** The last n alerts of each unit, and today's count and minutes under alert (since dayStart, Kyiv midnight). */
   async recent(units, dayStart, now, n = 5) {
@@ -173,13 +204,16 @@ export class Store {
       todayCount: t[x]?.n || 0, todayMs: t[x]?.ms || 0 }]));
   }
 
-  /** Per-chat and global limits, checked and recorded in one statement (atomic in D1, unlike count-then-insert). */
+  /** Per-chat and global limits, in the isolate's memory (audit round 4: a D1 row per tap cost ~6 writes of the
+   *  100 000 free per day). JS runs one event at a time per isolate, so check-and-record cannot interleave; each
+   *  Cloudflare isolate keeps its own window, which is enough to stop a flood without touching the database. */
   async allowed(chat, now = Date.now(), max = 8, windowMs = 10000, globalMax = 25, globalMs = 1000) {
-    const [, ins] = await this.db.batch([
-      this.q("DELETE FROM hits WHERE t < ?", now - windowMs),
-      this.q(`INSERT INTO hits SELECT ?1, ?2 WHERE (SELECT count(*) FROM hits WHERE chat_id=?1 AND t > ?3) < ?4
-        AND (SELECT count(*) FROM hits WHERE t > ?5) < ?6`, chat, now, now - windowMs, max, now - globalMs, globalMax),
-    ]);
-    return ins.meta.changes === 1;
+    const L = this.limits;
+    L.all = L.all.filter((t) => now - t < globalMs);
+    const mine = (L.chat.get(chat) || []).filter((t) => now - t < windowMs);
+    if (mine.length >= max || L.all.length >= globalMax) { L.chat.set(chat, mine); return false; }
+    mine.push(now); L.all.push(now); L.chat.set(chat, mine);
+    if (L.chat.size > 5000) for (const [c, ts] of L.chat) if (!ts.length || now - ts.at(-1) >= windowMs) L.chat.delete(c);
+    return true;
   }
 }
