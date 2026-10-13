@@ -136,8 +136,12 @@ export class Store {
     const rows = JSON.stringify(seed.alerts);
     const rank = (x) => `CASE ${x} WHEN 'red' THEN 2 WHEN 'yellow' THEN 1 ELSE 0 END`;
     await this.db.batch([
-      this.q(`DELETE FROM alerts WHERE started >= ?1 AND started <= ?2 AND NOT EXISTS (SELECT 1 FROM json_each(?3) j
-        WHERE json_extract(j.value, '$[0]') = alerts.unit AND json_extract(j.value, '$[1]') = alerts.started)`, seed.since, seed.data_end, rows),
+      // the seed's keys go to a keyed table first: comparing every alert with every json_each row read N×M rows
+      // (3 760 × 3 760 ≈ 14 M on 13 Oct) and spent D1's 5 M free daily reads in one call. Now it is ~N + M.
+      this.q("DELETE FROM seed_keys"),
+      this.q(`INSERT OR IGNORE INTO seed_keys SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]') FROM json_each(?)`, rows),
+      this.q(`DELETE FROM alerts WHERE started >= ?1 AND started <= ?2 AND NOT EXISTS (SELECT 1 FROM seed_keys k
+        WHERE k.unit = alerts.unit AND k.started = alerts.started)`, seed.since, seed.data_end),
       this.q(`INSERT INTO alerts (unit, started, ended, level, max_level)
         SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]'), json_extract(value, '$[3]'),
           json_extract(value, '$[4]') FROM json_each(?1) WHERE true

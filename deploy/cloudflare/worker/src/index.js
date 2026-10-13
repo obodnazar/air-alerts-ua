@@ -174,7 +174,15 @@ export default {
       const update = await request.json().catch(() => null);
       if (update) {
         const router = new Router(new Store(env.DB), catalog, new Telegram(String(env.TELEGRAM_BOT_TOKEN || "").trim()));
-        try { await router.handle(update); } catch (e) { console.log("handler error", e.message); }
+        try { await router.handle(update); } catch (e) {
+          console.log("handler error", e.message);
+          // the database is down (e.g. D1's daily free limit): say so instead of silence; this path needs no database
+          const chat = update.message?.chat?.id ?? update.callback_query?.message?.chat?.id;
+          if (chat && /D1_ERROR|D1 /.test(String(e.message))) {
+            if (update.callback_query) await router.tg.answer(update.callback_query.id).catch(() => {});
+            await router.tg.send(chat, ui.DB_DOWN).catch(() => {});
+          }
+        }
       }
       return new Response("ok"); // always 200, so Telegram does not re-deliver the same update forever
     }

@@ -23,3 +23,6 @@ CREATE INDEX IF NOT EXISTS hits_t ON hits (t);
 -- alert history GitHub Actions sends to /ingest (kind "alerts"). ended IS NULL = still on. Times in ms (UTC).
 CREATE TABLE IF NOT EXISTS alerts (unit TEXT, started INTEGER, ended INTEGER, level TEXT, max_level TEXT, PRIMARY KEY (unit, started));
 CREATE INDEX IF NOT EXISTS alerts_open ON alerts (ended, unit);
+-- keys of the last alert history from /ingest (Store.applySeed); keyed so the heal is ~N + M row reads, not N×M
+CREATE TABLE IF NOT EXISTS seed_keys (unit TEXT, started INTEGER, PRIMARY KEY (unit, started));
+CREATE INDEX IF NOT EXISTS alerts_started ON alerts (started);

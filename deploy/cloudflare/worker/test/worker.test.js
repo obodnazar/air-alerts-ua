@@ -733,3 +733,34 @@ test("audit 3: ingest kind/replace are strict; first-wins is atomic; /stop and p
   tg.broken.clear();
   assert.equal((await deliver(s2, tg, EV)).sent, 0);
 });
+
+test("13 Oct: healing from a 4 000-alert history reads ~N + M rows, not N×M (D1 free daily limit)", async () => {
+  const store = new Store(fakeD1());
+  const t0 = Date.parse("2026-10-06T00:00:00Z");
+  const alerts = Array.from({ length: 4000 }, (_, i) => [catalog.units[i % 100], t0 + i * 60000, t0 + i * 60000 + 30000, "yellow", "yellow"]);
+  await store.saveLive(alerts.map(([unit, started, ended, level]) => ({ unit, started, ended, level, max_level: level })), { last: 10, ok: 1, gapTo: 0 });
+  const seed = { max_post_id: 20, since: t0, data_end: t0 + 4000 * 60000, alerts: alerts.slice(0, 3900) };
+  const t = performance.now();
+  await store.applySeed(seed, t0 + 5000 * 60000);
+  const ms = performance.now() - t;
+  assert.ok(ms < 300, `applySeed took ${ms.toFixed(0)} ms: quadratic again?`);
+  assert.equal((await store.db.raw.prepare("SELECT count(*) n FROM alerts").get()).n, 3900); // the 100 not in the history went
+  const plan = store.db.raw.prepare("EXPLAIN QUERY PLAN DELETE FROM alerts WHERE started >= 1 AND NOT EXISTS (SELECT 1 FROM seed_keys k WHERE k.unit = alerts.unit AND k.started = alerts.started)").all();
+  assert.ok(plan.some((r) => /SEARCH k USING .*INDEX/.test(r.detail)), JSON.stringify(plan));
+});
+
+test("database down: the user gets a short notice instead of silence", async () => {
+  const sent = [];
+  const env = { DB: { prepare: () => ({ bind() { return this; }, all: async () => { throw new Error("D1_ERROR: exceeded daily row read limit"); },
+    first: async () => { throw new Error("D1_ERROR: exceeded"); }, run: async () => { throw new Error("D1_ERROR: exceeded"); } }),
+    batch: async () => { throw new Error("D1_ERROR: exceeded"); } }, TELEGRAM_BOT_TOKEN: "x", WEBHOOK_SECRET: "w", INGEST_SECRET: "i" };
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => { sent.push(JSON.parse(init.body)); return new Response(JSON.stringify({ ok: true, result: {} })); };
+  try {
+    const res = await worker.fetch(new Request("https://x/telegram", { method: "POST", body: JSON.stringify(msg("/start", 7)),
+      headers: { "X-Telegram-Bot-Api-Secret-Token": "w" } }), env);
+    assert.equal(res.status, 200);
+    assert.equal(sent.at(-1).chat_id, 7);
+    assert.match(sent.at(-1).text, /тимчасово/);
+  } finally { globalThis.fetch = real; }
+});
