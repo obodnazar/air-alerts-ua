@@ -57,11 +57,17 @@ jobs:
         if: always()
         env:
           INGEST_URL: ${{ secrets.INGEST_URL }}
-        run: curl -fsS -A shkilnyi-ranok-publisher/1.0 "${INGEST_URL%/ingest}/health"   # 503 fails the run: GitHub e-mails the owner
+        # 503 three times in a row fails the run (GitHub e-mails the owner); one blip does not
+        run: curl -fsS --retry 3 --retry-delay 30 --retry-all-errors -m 20 -A shkilnyi-ranok-publisher/1.0 "${INGEST_URL%/ingest}/health"
+      - name: cache key for this publishing window
+        id: window
+        if: always()
+        run: echo "key=$(TZ=Europe/Kyiv date +%F-%p)" >> "$GITHUB_OUTPUT"
       - name: keep scraped posts for the next run
-        # only runs that refreshed the posts save a copy (each copy ~240 MB; GitHub keeps 10 GB per repo)
+        # one copy per publishing window, not per run (a copy is up to ~240 MB; GitHub keeps 10 GB per repo).
+        # A second save with the same key is refused by GitHub with a warning; the next run restores the newest copy.
         if: always() && hashFiles('data/interim/last_refresh') != ''
         uses: actions/cache/save@v4
         with:
           path: data/raw/telegram
-          key: posts-${{ github.run_id }}
+          key: posts-${{ steps.window.outputs.key }}

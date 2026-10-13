@@ -9,8 +9,8 @@ export class Telegram {
   // the arrow wrapper matters: calling the global fetch as this.fetch(...) throws "Illegal invocation" on Workers.
   // maxWait: how long one call may sleep on a 429 before giving up. The webhook waits a little; the scheduled
   // broadcast passes 0, so a 429 ends the run and the rest goes on the next tick (every retry costs a subrequest).
-  constructor(token, fetchFn = (...a) => fetch(...a), api = "https://api.telegram.org", { maxWait = 3, tries = 2 } = {}) {
-    this.base = `${api}/bot${token}`; this.fetch = fetchFn; this.maxWait = maxWait; this.tries = tries;
+  constructor(token, fetchFn = (...a) => fetch(...a), api = "https://api.telegram.org", { maxWait = 3, tries = 2, timeoutMs = 10000 } = {}) {
+    this.base = `${api}/bot${token}`; this.fetch = fetchFn; this.maxWait = maxWait; this.tries = tries; this.timeoutMs = timeoutMs;
   }
   async call(method, params) {
     for (let attempt = 1; ; attempt++) {
@@ -18,6 +18,7 @@ export class Telegram {
       try {
         res = await this.fetch(`${this.base}/${method}`, {
           method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(params),
+          signal: AbortSignal.timeout(this.timeoutMs), // a hung call must not eat the run's deadline
         });
       } catch {
         if (attempt < this.tries) continue;

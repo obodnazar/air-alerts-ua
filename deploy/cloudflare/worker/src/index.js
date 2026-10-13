@@ -14,7 +14,8 @@ const TG_BUDGET = 40;   // Workers Free: 50 external subrequests per invocation,
                         // and the live scrape (≤ PAGES = 5 fetches): 45 at most
 const CLAIM = 200;      // rows claimed per slot and run; those not sent (budget spent) go back to pending
 const SETTLE_EVERY = 10;          // write delivery progress every 10 sends (at most 4 extra D1 queries per run)
-const TIME_BUDGET_MS = 20000;     // stop sending after 20 s; waitUntil after /ingest is cut ~30 s after the response
+const TIME_BUDGET_MS = 22000;     // one deadline per run: waitUntil after /ingest is cut ~30 s after the response,
+const TG_TIMEOUT_MS = 6000;       // and each Telegram call is aborted after 6 s, so the last send ends by ~22 s + finish()
 const COMMANDS = [{ command: "now", description: "🌙 прогноз на найближчий шкільний день" },
   { command: "settings", description: "⚙️ райони, контрольна точка, час, стиль порад" },
   { command: "hours", description: "🕐 ризик тривоги на обрану годину" }, { command: "recent", description: "📜 останні тривоги" },
@@ -122,7 +123,7 @@ export function dueSlots(now = new Date()) {
 
 /** Deliver one slot from the outbox. `budget.calls` is shared by every slot of the run (Telegram subrequests);
  *  a 429 stops the whole run. Anything not sent stays pending for the next tick (every 5 minutes). */
-export async function deliver(store, tg, { kind, day, slot }, budget = { calls: TG_BUDGET }, now = Date.now()) {
+export async function deliver(store, tg, { kind, day, slot }, budget = newBudget(), now = Date.now()) {
   const f = await store.forecast(kind, day);
   if (!f) return { sent: 0, waiting: true };
   await store.plan(kind, day, slot);
@@ -139,14 +140,15 @@ export async function deliver(store, tg, { kind, day, slot }, budget = { calls: 
     const units = new Set(subs.flatMap((s) => s.units));
     for (const u of units) live[u] = liveState(meta, byUnit[u], now);
   }
-  const outcome = {}, started = Date.now();
+  const outcome = {}, clock = budget.clock || Date.now;
   let sent = 0, done = {};
   for (const sub of subs) {
     const text = kind === "evening" ? ui.eveningMessage(sub, rows, day, f.banner)
       : ui.morningMessage(sub, rows, day, f.banner, live);
     if (!text) { outcome[sub.chat_id] = "skipped"; continue; } // e.g. morning without an alert in their raions
     // budget: Telegram calls shared by the run, and time (waitUntil after /ingest has ~30 s); the rest stays pending
-    if (budget.calls <= 0 || budget.stop || Date.now() - started > TIME_BUDGET_MS) continue;
+    // a send may take up to TG_TIMEOUT_MS: start one only if it can finish before the run's deadline
+    if (budget.calls <= 0 || budget.stop || (budget.deadline && clock() + TG_TIMEOUT_MS > budget.deadline)) continue;
     budget.calls--;
     try { await tg.send(sub.chat_id, text); outcome[sub.chat_id] = done[sub.chat_id] = "sent"; sent++; }
     catch (e) {
@@ -162,13 +164,35 @@ export async function deliver(store, tg, { kind, day, slot }, budget = { calls: 
 
 /** One delivery run over every slot due now, with one shared budget. Called by the 5-minute cron and right after
  *  /ingest, so a forecast that arrives at 20:02 goes out at 20:02, not at the next tick. */
+/** The send budget of one run: Telegram calls and one deadline shared by every slot (audit round 5: a per-slot timer
+ *  let three slots take 60 s). `clock` is injectable for tests. */
+export const newBudget = (clock = Date.now) => ({ calls: TG_BUDGET, deadline: clock() + TIME_BUDGET_MS, clock });
+
 export async function runDue(env, now = Date.now()) {
-  const store = new Store(env.DB), tg = new Telegram(String(env.TELEGRAM_BOT_TOKEN || "").trim(), undefined, undefined, { maxWait: 0, tries: 1 });
-  const budget = { calls: TG_BUDGET };
+  const store = new Store(env.DB);
+  const tg = new Telegram(String(env.TELEGRAM_BOT_TOKEN || "").trim(), undefined, undefined, { maxWait: 0, tries: 1, timeoutMs: TG_TIMEOUT_MS });
+  const budget = newBudget();
   for (const slot of dueSlots(new Date(now))) {
     const r = await deliver(store, tg, slot, budget, now);
     if (r.sent || r.waiting) console.log(JSON.stringify({ ...slot, ...r }));
   }
+}
+
+/** Once a Kyiv day, on the first tick from 03:00 on: a missed tick or the DST jump at 03:00 only delays it (round 5). */
+export async function dailyCleanup(store, now = Date.now()) {
+  const k = kyivNow(new Date(now));
+  if (k.hhmm < "03:00" || (await store.kv("cleanup_day")) === k.day) return false;
+  await store.cleanup(k.day);
+  await store.kv("cleanup_day", k.day);
+  return true;
+}
+
+async function ingestExtras(store, body) {
+  if (body.kind === "hourly") {
+    await store.saveHourly(body.as_of, { as_of: body.as_of, step: body.step, units: body.units, surv: body.surv, gates: body.gates });
+    return { ok: true, units: Object.keys(body.units).length };
+  }
+  return { ok: true, ...(await store.applySeed(body)) };
 }
 
 export default {
@@ -200,11 +224,17 @@ export default {
       if (body?.kind === "hourly" || body?.kind === "alerts") {
         const bad = body.kind === "hourly" ? invalidHourly(body) : invalidAlerts(body);
         if (bad) return Response.json({ ok: false, error: bad }, { status: 400 });
-        if (body.kind === "hourly") {
-          await store.saveHourly(body.as_of, { as_of: body.as_of, step: body.step, units: body.units, surv: body.surv, gates: body.gates });
-          return Response.json({ ok: true, units: Object.keys(body.units).length });
+        // once per publishing window (date + am/pm), so backup runs retry a failed send but skip a done one (round 5)
+        if (body.window !== undefined && !/^\d{4}-\d{2}-\d{2}-(am|pm)$/.test(String(body.window))) {
+          return Response.json({ ok: false, error: "window" }, { status: 400 });
         }
-        return Response.json({ ok: true, ...(await store.applySeed(body)) });
+        const done = `extras_${body.kind}`;
+        if (body.window && body.replace !== true && (await store.kv(done)) === body.window) {
+          return Response.json({ ok: true, skipped: "window" });
+        }
+        const res = await ingestExtras(store, body);
+        if (body.window) await store.kv(done, body.window);
+        return Response.json(res);
       }
       const bad = invalid(body);
       if (bad) return Response.json({ ok: false, error: bad }, { status: 400 });
@@ -238,15 +268,22 @@ export default {
       }
     }
     if (url.pathname === "/health") {
-      // what monitoring needs, at ~3 row reads: is the database readable, how old is the live scrape and the last ingest
+      // what monitoring needs, at ~F + 3 row reads (F = forecast rows, bounded by cleanup): database, live data, ingests
       try {
         const store = new Store(env.DB), now = Date.now();
-        const [meta, last] = await Promise.all([store.liveMeta(),
-          env.DB.prepare("SELECT max(received) AS r FROM forecasts").first()]);
+        const [meta, ages] = await Promise.all([store.liveMeta(),
+          env.DB.prepare("SELECT kind, max(received) AS r FROM forecasts GROUP BY kind").all()]);
+        const age = Object.fromEntries(ages.results.map((x) => [x.kind, (now - Date.parse(x.r)) / 3600000]));
+        const school = Math.min(age.evening ?? Infinity, age.morning ?? Infinity);
+        // the same freshness rule the bot uses for "now" (live.js), and each input checked on its own (round 5)
+        const live = liveState(meta, null, now) !== null;
         const liveAgeMin = meta.ok ? Math.round((now - meta.ok) / 60000) : null;
-        const ingestAgeH = last?.r ? Math.round((now - Date.parse(last.r)) / 3600000) : null;
-        const ok = liveAgeMin !== null && liveAgeMin <= 30 && ingestAgeH !== null && ingestAgeH <= 26; // hourly parameters arrive every day, weekends too
-        return Response.json({ ok, db: true, live_age_min: liveAgeMin, ingest_age_h: ingestAgeH }, { status: ok ? 200 : 503 });
+        const ingestAgeH = Number.isFinite(school) ? Math.round(school) : null;
+        const hourlyAgeH = Number.isFinite(age.hourly) ? Math.round(age.hourly) : null;
+        // school forecasts: Friday morning -> Sunday evening is ~60 h; hourly parameters come twice a day, every day
+        const ok = live && ingestAgeH !== null && ingestAgeH <= 64 && hourlyAgeH !== null && hourlyAgeH <= 26;
+        return Response.json({ ok, db: true, live, live_age_min: liveAgeMin, live_gap: meta.gapTo > 0,
+          ingest_age_h: ingestAgeH, hourly_age_h: hourlyAgeH }, { status: ok ? 200 : 503 });
       } catch (e) {
         return Response.json({ ok: false, db: false, error: String(e?.message || e).slice(0, 120) }, { status: 503 });
       }
@@ -262,7 +299,6 @@ export default {
       if (r.posts || r.gap) console.log(JSON.stringify({ scrape: r }));
     } catch (e) { console.log("scrape failed", String(e?.message || e).slice(0, 200)); } // the bot then says "no fresh data"
     await runDue(env, event.scheduledTime);
-    const k = kyivNow(new Date(event.scheduledTime));
-    if (k.hhmm >= "03:00" && k.hhmm < "03:05") await new Store(env.DB).cleanup(k.day).catch((e) => console.log("cleanup failed", e.message));
+    await dailyCleanup(new Store(env.DB), event.scheduledTime).catch((e) => console.log("cleanup failed", e.message));
   },
 };

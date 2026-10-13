@@ -5,7 +5,7 @@ import { Store } from "../src/store.js";
 import { Router } from "../src/router.js";
 import { catalog, search } from "../src/catalog.js";
 import * as ui from "../src/ui.js";
-import worker, { dueSlots, deliver, invalid } from "../src/index.js";
+import worker, { dueSlots, deliver, invalid, newBudget, dailyCleanup } from "../src/index.js";
 import { Telegram, RateLimited } from "../src/telegram.js";
 import { readFileSync } from "node:fs";
 
@@ -830,9 +830,68 @@ test("audit 4: /health reports the database and data ages; a too-large history i
   await store.saveLive([], { last: 1, ok: Date.now(), gapTo: 0 });
   await store.saveForecast("morning", "2026-10-13", { rows: [] });
   res = await worker.fetch(new Request("https://x/health"), env);
+  assert.equal(res.status, 503);                                               // hourly parameters missing (round 5)
+  await store.saveHourly("2026-10-13", { as_of: "2026-10-13" });
+  res = await worker.fetch(new Request("https://x/health"), env);
   assert.equal(res.status, 200);
   assert.equal((await res.json()).db, true);
   const big = { max_post_id: 1, since: 1.75e12, data_end: 1.76e12,
     alerts: Array.from({ length: 19000 }, (_, i) => ["Білгород-Дністровський район", 1.75e12 + i, null, "yellow", "yellow"]) };
   assert.equal(invalidAlerts(big), "alerts too large");
+});
+
+// ---------- audit round 5 (Codex, 14 Oct): gaps in the round-4 fixes ----------
+test("audit 5: one deadline for the whole run, across slots, with slow Telegram", async () => {
+  const store = new Store(fakeD1());
+  await fill(store, 30, "20:00", 1); await fill(store, 30, "20:30", 101); await fill(store, 30, "21:00", 201);
+  await store.saveForecast("evening", "2026-10-13", { rows, banner: "" });
+  let t = 0;
+  const clock = () => t, tg = new FakeTG({ onSend: async () => { t += 1500; } });   // every send takes 1.5 s
+  const budget = newBudget(clock);
+  let sent = 0;
+  for (const s of ["20:00", "20:30", "21:00"]) sent += (await deliver(store, tg, { ...EV, slot: s }, budget)).sent;
+  assert.ok(t <= 22000, `run took ${t} ms of virtual time`);
+  assert.equal(sent, 11);                                                      // (22 s - 6 s timeout reserve) / 1.5 s + 1
+});
+
+test("audit 5: extras once per window, retried by a backup if the first failed; hash includes the cursor", async () => {
+  const env = { DB: fakeD1(), TELEGRAM_BOT_TOKEN: "x", WEBHOOK_SECRET: "w", INGEST_SECRET: "i".repeat(32) };
+  const post = (b) => worker.fetch(new Request("https://x/ingest", { method: "POST", body: JSON.stringify(b),
+    headers: { Authorization: `Bearer ${env.INGEST_SECRET}` } }), env).then((r) => r.json());
+  const t0 = 1.76e12;
+  const seed = { kind: "alerts", max_post_id: 100, since: t0, data_end: t0 + 1e6, alerts: [["Київ", t0 + 10, t0 + 20, "yellow", "yellow"]] };
+  assert.equal((await post({ ...seed, window: "2026-10-14-am" })).ok, true);
+  assert.equal((await post({ ...seed, window: "2026-10-14-am" })).skipped, "window");      // the backup run
+  assert.equal((await post({ ...seed, window: "2026-10-14-bad" })).error, "window");
+  const store = new Store(env.DB);
+  await store.saveLive([], { last: 100, ok: 1, gapTo: 150 });
+  const r = await post({ ...seed, max_post_id: 200, window: "2026-10-14-pm" });           // same alerts, newer cursor
+  assert.notEqual(r.skipped, "identical");
+  const m = await store.liveMeta();
+  assert.deepEqual([m.last, m.gapTo], [200, 0]);
+});
+
+test("audit 5: the limiter's memory is capped even when everything is rejected", async () => {
+  const store = new Store(fakeD1());
+  for (let i = 0; i < 10025; i++) await store.allowed(i, 1e12);
+  assert.ok(store.limits.chat.size <= 2000, `map size ${store.limits.chat.size}`);
+});
+
+test("audit 5: daily cleanup runs once a Kyiv day, catching up after a missed 03:00 tick", async () => {
+  const store = new Store(fakeD1());
+  assert.equal(await dailyCleanup(store, Date.parse("2026-10-14T23:59:00Z")), false);  // 02:59 Kyiv
+  assert.equal(await dailyCleanup(store, Date.parse("2026-10-15T00:07:00Z")), true);   // 03:07
+  assert.equal(await dailyCleanup(store, Date.parse("2026-10-15T00:12:00Z")), false);  // done today
+  assert.equal(await dailyCleanup(store, Date.parse("2026-10-16T05:00:00Z")), true);   // missed 03:00, runs at 08:00
+  assert.equal(await dailyCleanup(store, Date.parse("2027-03-28T01:05:00Z")), true);   // DST day: 04:05 Kyiv
+});
+
+test("audit 5: /health is red on a live gap", async () => {
+  const env = { DB: fakeD1(), TELEGRAM_BOT_TOKEN: "x", WEBHOOK_SECRET: "w", INGEST_SECRET: "i" };
+  const store = new Store(env.DB);
+  await store.saveForecast("morning", "2026-10-13", { rows: [] }); await store.saveHourly("2026-10-13", { as_of: "2026-10-13" });
+  await store.saveLive([], { last: 1, ok: Date.now(), gapTo: 100 });
+  const res = await worker.fetch(new Request("https://x/health"), env);
+  assert.equal(res.status, 503);
+  assert.equal((await res.json()).live_gap, true);
 });

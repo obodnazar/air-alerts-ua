@@ -69,16 +69,16 @@ def in_window(now: pd.Timestamp) -> bool:
     return "20:00" <= hhmm <= "21:30" or "08:00" <= hhmm <= "09:30"
 
 
-def extras_due(now: pd.Timestamp, status: int | None, force: bool) -> bool:
-    """Send the hourly parameters and the 7-day alert history about twice a day, not on every run (audit round 4: six
-    histories a day cost ~10 000 D1 writes each). With a school forecast: only the run that published it first (200).
-    Weekends: only runs in the first 40 minutes of a window (the early one, not the backups)."""
+def extras_window(now: pd.Timestamp, force: bool) -> str | None | bool:
+    """Which publishing window the hourly parameters and the alert history belong to: "2026-10-14-am" / "-pm".
+    Every run inside a window sends them with this key; the Worker applies the first success per window and answers
+    "skipped" to the rest, so a backup run repairs a failed send and never repeats a good one (audit round 5).
+    False outside the windows; None for a manual run (always applied)."""
     if force:
-        return True
-    if status is not None:
-        return status == 200
-    hhmm = now.strftime("%H:%M")
-    return "20:00" <= hhmm <= "20:40" or "08:00" <= hhmm <= "08:40"
+        return None
+    if not in_window(now):
+        return False
+    return f"{now.date().isoformat()}-{'pm' if now.hour >= 12 else 'am'}"
 
 
 def forced(kind: str, day: str) -> tuple[str, str]:
@@ -189,9 +189,11 @@ def main() -> None:
             failed.append(f"{kind} {day} -> {status} {text}")
         else:
             print(kind, day, "->", status, text)
-    if extras_due(pd.Timestamp.now(tz="Europe/Kyiv"), status, bool(a.force)):
+    window = extras_window(pd.Timestamp.now(tz="Europe/Kyiv"), bool(a.force))
+    if window is not False:
         try:  # after the school forecast and whatever happened to it
             for body in extras(pd.Timestamp.now(tz="Europe/Kyiv")):
+                body.update(window=window) if window else body.update(replace=True)
                 code, text = post(body)
                 print(body["kind"], "->", code, text)
                 if code != 200:
@@ -199,7 +201,7 @@ def main() -> None:
         except Exception as e:  # noqa: BLE001 - reported below, after the school forecast went out
             failed.append(f"extras: {type(e).__name__} {str(e)[:200]}")
     else:
-        print("extras: skipped (sent by the first run of this window)")
+        print("extras: outside the publishing windows")
     if failed:  # a red run is the alert: GitHub e-mails the owner
         raise SystemExit("; ".join(failed))
 

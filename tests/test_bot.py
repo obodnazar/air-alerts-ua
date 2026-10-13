@@ -393,13 +393,42 @@ def test_publisher_early_wait_on_dst_days(monkeypatch):
     assert slept == [19 * 60 + 20] * 3
 
 
-def test_extras_about_twice_a_day():
-    from airalerts.botapp.publish import extras_due
+def test_extras_keyed_by_window():
+    from airalerts.botapp.publish import extras_window
 
     k = lambda s: pd.Timestamp(s, tz="Europe/Kyiv")  # noqa: E731
-    assert extras_due(k("2026-10-14 20:01"), 200, False)          # the run that published the school forecast
-    assert not extras_due(k("2026-10-14 20:41"), 409, False)      # its backup
-    assert not extras_due(k("2026-10-14 20:01"), 500, False)      # failed forecast: the run fails anyway
-    assert extras_due(k("2026-10-17 08:01"), None, False)         # Saturday, early run
-    assert not extras_due(k("2026-10-17 09:02"), None, False)     # Saturday, backup
-    assert extras_due(k("2026-10-17 15:00"), None, True)          # manual
+    assert extras_window(k("2026-10-14 20:01"), False) == "2026-10-14-pm"
+    assert extras_window(k("2026-10-14 21:05"), False) == "2026-10-14-pm"   # backup: same key, the Worker skips or repairs
+    assert extras_window(k("2026-10-31 08:02"), False) == "2026-10-31-am"   # Saturday, winter time
+    assert extras_window(k("2026-10-14 15:00"), False) is False
+    assert extras_window(k("2026-10-14 15:00"), True) is None
+
+
+def test_publisher_fails_the_run_when_an_extra_fails(monkeypatch):
+    """school 200, hourly 500, alerts 200 -> a red run (GitHub e-mails the owner)."""
+    from airalerts.botapp import forecasts, publish
+    import airalerts.live as live
+
+    monkeypatch.setattr(publish, "seed_history", lambda: None)
+    monkeypatch.setattr(live, "refresh", lambda: None)
+    monkeypatch.setattr(live, "STAMP", type("S", (), {"read_text": lambda self, encoding=None: "x"})())
+    monkeypatch.setattr(publish, "newest_post", lambda: None)
+    monkeypatch.setattr(forecasts, "morning", lambda day: pd.DataFrame([]))
+    monkeypatch.setattr(publish, "extras", lambda now: [dict(kind="hourly"), dict(kind="alerts")])
+    monkeypatch.setattr("airalerts.botapp.banner.fetch", lambda t: "")
+    codes = iter([200, 500, 200])
+    monkeypatch.setattr(publish, "post", lambda body: (next(codes), "{}"))
+    monkeypatch.setattr("sys.argv", ["publish", "--force", "morning", "2026-10-14"])
+    with pytest.raises(SystemExit, match="hourly -> 500"):
+        publish.main()
+
+
+def test_workflow_checks_health_with_retries_and_caches_per_window():
+    yaml = pytest.importorskip("yaml")
+
+    wf = yaml.safe_load(open(".github/workflows/forecast.yml", encoding="utf-8"))
+    steps = wf["jobs"]["publish"]["steps"]
+    health = next(s for s in steps if "/health" in s.get("run", ""))
+    assert "--retry" in health["run"] and health.get("if") == "always()"
+    save = next(s for s in steps if s.get("uses", "").startswith("actions/cache/save"))
+    assert "run_id" not in save["with"]["key"]                               # not one copy per run

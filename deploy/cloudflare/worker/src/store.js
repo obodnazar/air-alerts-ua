@@ -156,7 +156,8 @@ export class Store {
   async applySeed(seed, now = Date.now()) {
     const rows = JSON.stringify(seed.alerts);
     // the same history twice (summer: two runs per window) costs one read, not ~10 000 writes (audit round 4)
-    const hash = await sha256(rows + seed.since + seed.data_end);
+    // the cursor is part of it: the same alerts with a newer max_post_id still move the cursor and close a gap (round 5)
+    const hash = await sha256(`${rows}|${seed.since}|${seed.data_end}|${seed.max_post_id}`);
     const meta = await this.liveMeta();
     if ((await this.kv("seed_hash")) === hash) return { rows: seed.alerts.length, skipped: "identical" };
     const newer = seed.max_post_id >= meta.last ? 1 : 0;
@@ -209,11 +210,16 @@ export class Store {
    *  Cloudflare isolate keeps its own window, which is enough to stop a flood without touching the database. */
   async allowed(chat, now = Date.now(), max = 8, windowMs = 10000, globalMax = 25, globalMs = 1000) {
     const L = this.limits;
+    // best effort per isolate (Cloudflare may run several): it stops floods, it is not an exact global quota.
+    // The map is pruned before any decision and hard-capped, so rejected new chats cannot grow it (round 5)
+    if (L.chat.size >= 2000) {
+      for (const [c, ts] of L.chat) if (!ts.length || now - ts.at(-1) >= windowMs) L.chat.delete(c);
+      if (L.chat.size >= 2000) L.chat.clear();
+    }
     L.all = L.all.filter((t) => now - t < globalMs);
     const mine = (L.chat.get(chat) || []).filter((t) => now - t < windowMs);
-    if (mine.length >= max || L.all.length >= globalMax) { L.chat.set(chat, mine); return false; }
+    if (mine.length >= max || L.all.length >= globalMax) { if (mine.length) L.chat.set(chat, mine); else L.chat.delete(chat); return false; }
     mine.push(now); L.all.push(now); L.chat.set(chat, mine);
-    if (L.chat.size > 5000) for (const [c, ts] of L.chat) if (!ts.length || now - ts.at(-1) >= windowMs) L.chat.delete(c);
     return true;
   }
 }
