@@ -187,12 +187,12 @@ export async function dailyCleanup(store, now = Date.now()) {
   return true;
 }
 
-async function ingestExtras(store, body) {
+async function ingestExtras(store, body, mark = null) {
   if (body.kind === "hourly") {
-    await store.saveHourly(body.as_of, { as_of: body.as_of, step: body.step, units: body.units, surv: body.surv, gates: body.gates });
+    await store.saveHourly(body.as_of, { as_of: body.as_of, step: body.step, units: body.units, surv: body.surv, gates: body.gates }, mark);
     return { ok: true, units: Object.keys(body.units).length };
   }
-  return { ok: true, ...(await store.applySeed(body)) };
+  return { ok: true, ...(await store.applySeed(body, Date.now(), mark)) };
 }
 
 export default {
@@ -228,12 +228,15 @@ export default {
         if (body.window !== undefined && !/^\d{4}-\d{2}-\d{2}-(am|pm)$/.test(String(body.window))) {
           return Response.json({ ok: false, error: "window" }, { status: 400 });
         }
-        const done = `extras_${body.kind}`;
-        if (body.window && body.replace !== true && (await store.kv(done)) === body.window) {
-          return Response.json({ ok: true, skipped: "window" });
+        const mark = body.window ? { key: `extras_${body.kind}`, window: body.window } : null;
+        if (mark && body.replace !== true && (await store.kv(mark.key)) === mark.window) {
+          // hourly: done for this window. Alerts: done unless this history can still heal the live data (a gap, or
+          // posts newer than the cursor), so a backup run in the same window can repair what the scrape missed (audit 6)
+          const meta = body.kind === "alerts" ? await store.liveMeta() : null;
+          if (!meta || (!(meta.gapTo > 0) && body.max_post_id <= meta.last)) return Response.json({ ok: true, skipped: "window" });
         }
-        const res = await ingestExtras(store, body);
-        if (body.window) await store.kv(done, body.window);
+        // the data and the window flag go in one D1 batch: a crash cannot leave one without the other
+        const res = await ingestExtras(store, body, mark);
         return Response.json(res);
       }
       const bad = invalid(body);
@@ -271,19 +274,22 @@ export default {
       // what monitoring needs, at ~F + 3 row reads (F = forecast rows, bounded by cleanup): database, live data, ingests
       try {
         const store = new Store(env.DB), now = Date.now();
-        const [meta, ages] = await Promise.all([store.liveMeta(),
-          env.DB.prepare("SELECT kind, max(received) AS r FROM forecasts GROUP BY kind").all()]);
-        const age = Object.fromEntries(ages.results.map((x) => [x.kind, (now - Date.parse(x.r)) / 3600000]));
-        const school = Math.min(age.evening ?? Infinity, age.morning ?? Infinity);
-        // the same freshness rule the bot uses for "now" (live.js), and each input checked on its own (round 5)
+        // the forecasts the schedule needs by now, not just "something recent" (audit 6): after 20:30 the evening
+        // forecast for the next school day, after 08:30 the morning one for today; hourly parameters as of yesterday
+        // or later. Each lookup is one row by primary key.
+        const k = kyivNow(new Date(now)), tomorrow = addDays(k.day, 1);
+        const needEvening = k.hhmm >= "20:30" && weekday(tomorrow) < 5, needMorning = k.hhmm >= "08:30" && weekday(k.day) < 5;
+        const [meta, ev, mo, hourly] = await Promise.all([store.liveMeta(),
+          needEvening ? store.forecast("evening", tomorrow) : true, needMorning ? store.forecast("morning", k.day) : true,
+          store.hourlyParams()]);
         const live = liveState(meta, null, now) !== null;
         const liveAgeMin = meta.ok ? Math.round((now - meta.ok) / 60000) : null;
-        const ingestAgeH = Number.isFinite(school) ? Math.round(school) : null;
-        const hourlyAgeH = Number.isFinite(age.hourly) ? Math.round(age.hourly) : null;
-        // school forecasts: Friday morning -> Sunday evening is ~60 h; hourly parameters come twice a day, every day
-        const ok = live && ingestAgeH !== null && ingestAgeH <= 64 && hourlyAgeH !== null && hourlyAgeH <= 26;
+        const hourlyAsOf = hourly?.as_of ?? null;
+        const school = !!ev && !!mo, hourlyOk = !!hourlyAsOf && hourlyAsOf >= addDays(k.day, -1);
+        const ok = live && school && hourlyOk;
         return Response.json({ ok, db: true, live, live_age_min: liveAgeMin, live_gap: meta.gapTo > 0,
-          ingest_age_h: ingestAgeH, hourly_age_h: hourlyAgeH }, { status: ok ? 200 : 503 });
+          evening_needed: needEvening ? !!ev : null, morning_needed: needMorning ? !!mo : null, hourly_as_of: hourlyAsOf },
+        { status: ok ? 200 : 503 });
       } catch (e) {
         return Response.json({ ok: false, db: false, error: String(e?.message || e).slice(0, 120) }, { status: 503 });
       }
@@ -294,11 +300,14 @@ export default {
   // One cron for both jobs: a second schedule (minutes 2, 7, 12…) was deployed on 12 Oct and never fired.
   // The scrape goes first and cannot block delivery: its failure is logged, and live_ok is not renewed.
   async scheduled(event, env) {
-    try {
+    // every minute (wrangler.toml): delivery each minute gives ~40 messages a minute, 5x the old throughput (audit 6);
+    // the scrape and the cleanup stay every 5 minutes
+    const fifth = new Date(event.scheduledTime).getUTCMinutes() % 5 === 0;
+    if (fifth) try {
       const r = await scrape(new Store(env.DB), (...a) => fetch(...a), catalog.units, event.scheduledTime);
       if (r.posts || r.gap) console.log(JSON.stringify({ scrape: r }));
     } catch (e) { console.log("scrape failed", String(e?.message || e).slice(0, 200)); } // the bot then says "no fresh data"
     await runDue(env, event.scheduledTime);
-    await dailyCleanup(new Store(env.DB), event.scheduledTime).catch((e) => console.log("cleanup failed", e.message));
+    if (fifth) await dailyCleanup(new Store(env.DB), event.scheduledTime).catch((e) => console.log("cleanup failed", e.message));
   },
 };

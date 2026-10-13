@@ -141,7 +141,7 @@ export class Router {
       return "Спершу оберіть район: /start";
     } else if (kind === "s" && sub) {
       if (val === "units") await this.tg.edit(chat, mid, "🏫 <b>Мої райони</b> (до 3)", ui.unitsKeyboard(sub.units, this.index, sub.units.length < MAX_UNITS));
-      else if (val in ui.SCREENS) await this.tg.edit(chat, mid, ...ui.screen(val, sub));
+      else if (Object.hasOwn(ui.SCREENS, val)) await this.tg.edit(chat, mid, ...ui.screen(val, sub));
       else await this.settings(chat, mid);
     } else if (kind === "p" && ["0", "7", "14"].includes(val) && sub) {
       const until = val === "0" ? null : addDays(kyivNow(this.now()).day, Number(val));

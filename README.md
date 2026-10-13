@@ -217,7 +217,7 @@ These were designed after seeing the test and the live morning, so they are repo
 | The registered all-clear model was trained before the yellow/red reform | The 08:00 version uses the **level in force at 08:00** and the time already elapsed, on post-reform data | **+26.3%** [+14.8, +33.1]. It now gives the brief's 08:00 update per raion: "wait for the control point" or "call the remote day now" |
 | Occupied raions were a hand-made list | Share of each raion's area occupied on 31 Aug 2026, from the [DeepState map history](https://github.com/cyterat/deepstate-map-data) and [OPORA raion boundaries](https://github.com/OPORA/map_2020) ([geo.py](src/airalerts/geo.py)) | Selects exactly the hand-listed raions; a test keeps them in agreement |
 | Full reproduction needed ~1.5 h of Telegram scraping | Parsed alerts and Air Force threat posts committed as snapshots; `scripts/reproduce.sh` | **2 min 18 s** from a fresh clone; it ends with "results match the committed ones" |
-| Would a later evening forecast (21:30, 22:00) or neighbouring raions help? | Tested on validation ([experiments.py](src/airalerts/experiments.py)) | No: neither 21:30/22:00 nor neighbours beat the 20:00 base model on validation. Kept the simpler model |
+| Would a later evening forecast (21:30, 22:00) or neighbouring raions help? | Tested on validation ([experiments.py](src/airalerts/experiments.py)) | Mixed, so no change: on validation 22:00 scored better than 20:00 (Brier 0.0818 vs 0.0831), but on test it was worse (0.1303 vs 0.1289); 21:30 was worse on both. Neighbours added < 1 SE on validation. Kept 20:00, which also leaves families the evening to plan ([posthoc_evening_neighbours.csv](results/posthoc_evening_neighbours.csv); corrected 13 Oct, audit 6) |
 | Can news predict alerts? Keyword watcher on Lachen (8 570 posts) + Air Force | [events.py](src/airalerts/events.py): mass-attack warnings, truce, retaliation threats | Warnings precede a mass night 1.5× more often but cover only 17% of them, and add nothing meaningful to the 20:00 model (gain 1e-5). After truce news, alerts fell in 5 of 7 cases (n too small to claim). News fits as a banner, not as a feature |
 
 ## Risk by hour and recent alerts (after submission, 12 Oct)
@@ -245,12 +245,14 @@ A bot button asked for after the deadline: *"is an alert likely in my raion at 1
 
 The rule: the model is shown only where the CI is above 0 **and** both halves of the period (15–28 Sep, 29 Sep – 12 Oct) agree. Full table: [posthoc_hourly_summary.csv](results/posthoc_hourly_summary.csv); gates the bot reads: [hourly_gates.json](results/hourly_gates.json).
 
+*Reproducibility note (audit 6).* These hourly numbers were computed from the raw scraped posts available on 12 Oct; the committed snapshot covers slightly fewer observations, so re-running `python -m airalerts.hourly` from a fresh clone gives close but not identical metrics (e.g. 1 h while an alert is on: BSS 0.161 vs 0.160) with the **same gates**. `scripts/reproduce.sh` checks the registered results, not these post-hoc ones.
+
 **The honest result is narrow.**
 - The model helps **only while an alert is on**, and mostly for the next 1–3 hours: how likely the alert is to still be on, or to be on again.
 - **With no alert now, it cannot predict the next one** better than how often there was an alert at that hour over 4 weeks. The bot then shows exactly that share, labelled as history and not as a forecast.
 - **It is too low**: 57% at 1 h against 61% observed while an alert is on. Alerts cluster more than independent starts allow. Recalibrating it would need a new period to check on.
 
-**Live data for "now".** Forecasts arrive only twice a day, too stale for "now". So the Worker reads the public web preview of @UkraineAlarmSignal (t.me/s) itself every 5 minutes, at the start of the same cron run that delivers messages, and keeps open and recent alerts per raion in D1. GitHub Actions still runs only twice a day: it sends the hourly parameters and the last 7 days of alerts per raion, and that history heals anything the Worker missed.
+**Live data for "now".** Forecasts arrive only twice a day, too stale for "now". So the Worker reads the public web preview of @UkraineAlarmSignal (t.me/s) itself every 5 minutes (the cron runs every minute and delivers; every 5th run also scrapes), and keeps open and recent alerts per raion in D1. GitHub Actions publishes in two windows a day (evening and morning), from 6 scheduled runs: a main run per window for summer and winter time, plus backups. In each window it sends the hourly parameters and the last 7 days of alerts per raion once (a backup repairs a failed send), and that history heals anything the Worker missed.
 
 | Check (Workers Free plan) | Measured |
 |---|---|
@@ -288,11 +290,11 @@ Architecture and design notes: [docs/bot-architecture.md](docs/bot-architecture.
 - a **news banner** when a truce, a mass-attack warning or retaliation threats appear in the news: "not confirmed" if only Lachen reports it, "confirmed" if an official channel (President, Air Force) does too. The banner informs and does not change the numbers.
 
 **How it is built to survive in production:**
-- forecasts for all 104 raions are computed once and cached (~30 s);
-- one message per user per day, logged in SQLite, so a restart sends no duplicates;
+- forecasts for all 104 raions are computed once per window in GitHub Actions (~30 s) and stored in the Worker;
+- at most one message per user, kind (evening / morning) and day, through an outbox in D1, so a restart or an overlapping run sends no duplicates (a run cut after Telegram accepted a message can resend at most the last few);
 - it waits on HTTP 429 and switches off users who blocked the bot (403);
 - it stays well below the ~30 messages/s limit;
-- it catches up if started late, and a failed job retries at most every 10 minutes.
+- it catches up if started late: a failed send stays pending and is retried on the next run (every minute) within 90 minutes of its slot; an older forecast is never sent.
 
 **Checked:** 18 offline tests with a fake Telegram, including 14 forged button payloads and spam, (every raion reachable by buttons, town search, settings, idempotent broadcast, schedule incl. weekends, 429 retry, banner confirmation). A real-data dry run produced the evening and morning messages for three subscribers with the live banner.
 

@@ -146,6 +146,10 @@ def build_store(official_csv: Path, telegram_episodes: Path, switch: pd.Timestam
     b = telegram_unit_alerts(tg)
     b = b[b.finished_at > switch].copy()
     b["started_at"] = b.started_at.clip(lower=switch)
+    # one dtype before concat: pandas 3 turns mixed time zones/units into object columns and .dt then fails (audit 6)
+    for df in (a, b):
+        for c in ("started_at", "finished_at"):
+            df[c] = pd.to_datetime(df[c], utc=True).dt.as_unit("ns")
     allr = pd.concat([a, b], ignore_index=True)
     # cap stuck alerts: they are censored at 24h rather than counted as a day-long alert
     long = (allr.finished_at - allr.started_at) > MAX_EPISODE

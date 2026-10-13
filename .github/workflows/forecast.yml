@@ -62,7 +62,7 @@ jobs:
       - name: cache key for this publishing window
         id: window
         if: always()
-        run: echo "key=$(TZ=Europe/Kyiv date +%F-%p)" >> "$GITHUB_OUTPUT"
+        run: echo "key=$(LC_ALL=C TZ=Europe/Kyiv date +%F-%p)" >> "$GITHUB_OUTPUT"   # LC_ALL=C: always AM/PM
       - name: keep scraped posts for the next run
         # one copy per publishing window, not per run (a copy is up to ~240 MB; GitHub keeps 10 GB per repo).
         # A second save with the same key is refused by GitHub with a warning; the next run restores the newest copy.

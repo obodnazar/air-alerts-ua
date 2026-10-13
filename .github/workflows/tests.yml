@@ -1,0 +1,32 @@
+name: tests
+# Every push: the Python suite on a clean Python 3.12 install and the Worker suite. A red run means a dependency or
+# code change broke something before it reaches the bot (audit 6: pandas 3 broke a fresh install unnoticed).
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q -r requirements.txt
+      - name: datasets the tests read
+        run: PYTHONPATH=src python -m airalerts.sources.vadimkin && PYTHONPATH=src python -m airalerts.sources.kaggle
+      - run: mkdir -p data/interim && cp data/snapshot/telegram_episodes.parquet data/interim/
+      - run: PYTHONPATH=src python -m pytest -q -p no:cacheprovider
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"   # node:sqlite without a flag (the D1 fake)
+      - run: npm test
+        working-directory: deploy/cloudflare/worker

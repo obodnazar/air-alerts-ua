@@ -111,8 +111,10 @@ export class Store {
     const r = await this.q("SELECT body FROM forecasts WHERE kind=? AND day=?", kind, day).first();
     return r ? JSON.parse(r.body) : null;
   }
-  async saveHourly(day, body) {
+  /** mark: {key, window}: the "done for this window" flag, written in the same transaction as the data (audit 6) */
+  async saveHourly(day, body, mark = null) {
     await this.db.batch([
+      ...(mark ? [this.q("INSERT INTO state VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", mark.key, mark.window)] : []),
       this.q("INSERT INTO forecasts VALUES ('hourly', ?1, ?2, ?3) ON CONFLICT(kind, day) DO UPDATE SET body=excluded.body, received=excluded.received",
         day, JSON.stringify(body), new Date().toISOString()),
       this.q("DELETE FROM forecasts WHERE kind='hourly' AND day < ?", day),
@@ -153,7 +155,7 @@ export class Store {
   /** Alert history from the Python pipeline (kind "alerts"): authoritative for alerts that started in [since, dataEnd],
    *  which is how it heals posts the Worker missed. An all-clear seen by either side wins (it is a fact); of two
    *  open rows of one raion only the earliest is kept (a later "start" was a level change seen without its start). */
-  async applySeed(seed, now = Date.now()) {
+  async applySeed(seed, now = Date.now(), mark = null) {
     const rows = JSON.stringify(seed.alerts);
     // the same history twice (summer: two runs per window) costs one read, not ~10 000 writes (audit round 4)
     // the cursor is part of it: the same alerts with a newer max_post_id still move the cursor and close a gap (round 5)
@@ -186,7 +188,7 @@ export class Store {
       this.q("DELETE FROM alerts WHERE started < ?", now - 14 * 86400000),
       this.q(`INSERT INTO state (key, value) SELECT key, value FROM json_each(?) WHERE true
         ON CONFLICT(key) DO UPDATE SET value=excluded.value`, JSON.stringify({
-        live_last_id: String(Math.max(meta.last, seed.max_post_id)), seed_hash: hash,
+        live_last_id: String(Math.max(meta.last, seed.max_post_id)), seed_hash: hash, ...(mark ? { [mark.key]: mark.window } : {}),
         live_gap_to: String(meta.gapTo && seed.max_post_id >= meta.gapTo ? 0 : meta.gapTo) })),
     ]);
     return { rows: seed.alerts.length, removed: gone.length, newer: !!newer };

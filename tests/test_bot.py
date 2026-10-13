@@ -424,7 +424,7 @@ def test_publisher_fails_the_run_when_an_extra_fails(monkeypatch):
 
 
 def test_workflow_checks_health_with_retries_and_caches_per_window():
-    yaml = pytest.importorskip("yaml")
+    import yaml  # required: requirements.txt (a skipped check hid two regressions, audit 6)
 
     wf = yaml.safe_load(open(".github/workflows/forecast.yml", encoding="utf-8"))
     steps = wf["jobs"]["publish"]["steps"]
@@ -432,3 +432,23 @@ def test_workflow_checks_health_with_retries_and_caches_per_window():
     assert "--retry" in health["run"] and health.get("if") == "always()"
     save = next(s for s in steps if s.get("uses", "").startswith("actions/cache/save"))
     assert "run_id" not in save["with"]["key"]                               # not one copy per run
+
+
+def test_publisher_sends_the_window_key(monkeypatch):
+    """Without a window key the Worker cannot skip a done window or let a backup repair a failed one (audit 6)."""
+    from airalerts.botapp import publish
+    import airalerts.live as live
+
+    monkeypatch.setattr(publish, "seed_history", lambda: None)
+    monkeypatch.setattr(live, "refresh", lambda: None)
+    monkeypatch.setattr(publish, "wait_for_issue", lambda now: now)
+    monkeypatch.setattr(publish, "what_now", lambda now: None)          # a weekend run: no school forecast
+    monkeypatch.setattr(publish, "in_window", lambda now: True)
+    monkeypatch.setattr(publish, "extras_window", lambda now, force: "2026-10-17-am")
+    monkeypatch.setattr(publish, "extras", lambda now: [dict(kind="hourly"), dict(kind="alerts")])
+    sent = []
+    monkeypatch.setattr(publish, "post", lambda body: (sent.append(dict(body)), (200, "{}"))[1])
+    monkeypatch.setattr("sys.argv", ["publish"])
+    publish.main()
+    assert [b["window"] for b in sent] == ["2026-10-17-am", "2026-10-17-am"]
+    assert not any(b.get("replace") for b in sent)

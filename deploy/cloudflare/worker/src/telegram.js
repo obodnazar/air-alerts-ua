@@ -24,8 +24,15 @@ export class Telegram {
         if (attempt < this.tries) continue;
         throw new Error(`${method}: network error`); // the original error may quote the URL
       }
-      const body = await res.json().catch(() => ({}));
-      if (res.ok) return body.result;
+      let body;
+      try { body = await res.json(); } catch {
+        // a 200 whose body was cut (timeout mid-stream) is not a confirmed delivery: report it as a transient error,
+        // so the row stays pending and is retried (a rare duplicate beats a message marked sent but lost; audit 6)
+        if (res.ok) throw new Error(`${method}: unreadable response`);
+        body = {};
+      }
+      if (res.ok && body?.ok === true) return body.result;
+      if (res.ok) throw new Error(`${method}: response without ok`);
       if (res.status === 429) {
         const wait = Number(body?.parameters?.retry_after ?? 1);
         if (attempt < this.tries && wait <= this.maxWait) { await new Promise((r) => setTimeout(r, 1000 * wait)); continue; }

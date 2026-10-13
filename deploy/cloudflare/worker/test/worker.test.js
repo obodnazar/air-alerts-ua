@@ -614,7 +614,7 @@ test("schedule: every 5-minute run scrapes first; a failed scrape does not stop 
   const env = { DB: fakeD1(), TELEGRAM_BOT_TOKEN: "x" };
   const real = globalThis.fetch, urls = [];
   globalThis.fetch = async (url) => { urls.push(String(url)); return new Response(PAGE); };
-  try { await worker.scheduled({ cron: "*/5 * * * *", scheduledTime: Date.parse("2026-10-12T18:02:00Z") }, env); } finally { globalThis.fetch = real; }
+  try { await worker.scheduled({ cron: "*/5 * * * *", scheduledTime: Date.parse("2026-10-12T18:05:00Z") }, env); } finally { globalThis.fetch = real; }
   assert.deepEqual(urls, ["https://t.me/s/UkraineAlarmSignal"]);
   const meta = await new Store(env.DB).liveMeta();
   assert.equal(meta.last, 654224); assert.equal(meta.gapTo, 654204);    // first run: what came before is unknown
@@ -894,4 +894,82 @@ test("audit 5: /health is red on a live gap", async () => {
   const res = await worker.fetch(new Request("https://x/health"), env);
   assert.equal(res.status, 503);
   assert.equal((await res.json()).live_gap, true);
+});
+
+// ---------- audit round 6 (Codex, 13 Oct) ----------
+test("audit 6: every minute delivers; only every 5th minute scrapes and cleans up", async () => {
+  const env = { DB: fakeD1(), TELEGRAM_BOT_TOKEN: "x", WEBHOOK_SECRET: "w", INGEST_SECRET: "i" };
+  const urls = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url) => { urls.push(String(url)); return new Response(JSON.stringify({ ok: true, result: {} })); };
+  try {
+    await worker.scheduled({ cron: "* * * * *", scheduledTime: Date.parse("2026-10-15T00:07:00Z") }, env);  // 03:07 Kyiv
+    assert.ok(!urls.some((u) => u.includes("t.me")));
+    assert.equal(await new Store(env.DB).kv("cleanup_day"), null);
+    await worker.scheduled({ cron: "* * * * *", scheduledTime: Date.parse("2026-10-15T00:10:00Z") }, env);  // 03:10
+    assert.ok(urls.some((u) => u.includes("t.me")));
+    assert.equal(await new Store(env.DB).kv("cleanup_day"), "2026-10-15");                                   // cleanup is wired in
+  } finally { globalThis.fetch = real; }
+});
+
+test("audit 6: a 200 with a cut or ok-less body is not a delivery; the row stays pending", async () => {
+  const cut = async () => new Response('{"ok":true,"res', { status: 200 });
+  await assert.rejects(new Telegram("t", cut, undefined, { tries: 1 }).send(1, "hi"), /unreadable/);
+  const noOk = async () => new Response('{"result":{}}', { status: 200 });
+  await assert.rejects(new Telegram("t", noOk, undefined, { tries: 1 }).send(1, "hi"), /without ok/);
+  const store = new Store(fakeD1());
+  await fill(store, 1);
+  await store.saveForecast("evening", "2026-10-13", { rows, banner: "" });
+  const tg = { send: () => new Telegram("t", cut, undefined, { tries: 1 }).send(1, "x") };
+  assert.equal((await deliver(store, tg, EV)).sent, 0);
+  assert.equal(await store.pending("evening", "2026-10-13", "20:00"), 1);
+});
+
+test("audit 6: a backup in the same window still heals a live gap; window flag and data commit together", async () => {
+  const env = { DB: fakeD1(), TELEGRAM_BOT_TOKEN: "x", WEBHOOK_SECRET: "w", INGEST_SECRET: "i".repeat(32) };
+  const post = (b) => worker.fetch(new Request("https://x/ingest", { method: "POST", body: JSON.stringify(b),
+    headers: { Authorization: `Bearer ${env.INGEST_SECRET}` } }), env).then((r) => r.json());
+  const t0 = 1.76e12, store = new Store(env.DB);
+  const seed = { kind: "alerts", max_post_id: 100, since: t0, data_end: t0 + 1e6, alerts: [["Київ", t0 + 10, t0 + 20, "yellow", "yellow"]], window: "2026-10-14-am" };
+  await post(seed);
+  assert.equal(await store.kv("extras_alerts"), "2026-10-14-am");
+  await store.saveLive([], { last: 110, ok: 1, gapTo: 150 });                  // the scrape missed posts after the seed
+  const r = await post({ ...seed, max_post_id: 200 });
+  assert.notEqual(r.skipped, "window");
+  assert.equal((await store.liveMeta()).gapTo, 0);
+  assert.equal((await post({ ...seed, max_post_id: 200 })).skipped, "window"); // nothing left to heal: skipped
+  // the flag is written by the same batch as the data: a failing batch leaves neither
+  const s2 = new Store(fakeD1());
+  s2.db.batch = async () => { throw new Error("D1 down"); };
+  await assert.rejects(s2.saveHourly("2026-10-14", { as_of: "2026-10-14" }, { key: "extras_hourly", window: "2026-10-14-am" }));
+  assert.equal(await s2.kv("extras_hourly"), null);
+});
+
+test("audit 6: /health needs the forecast the schedule needs now, and hourly parameters of yesterday or later", async () => {
+  const env = { DB: fakeD1(), TELEGRAM_BOT_TOKEN: "x", WEBHOOK_SECRET: "w", INGEST_SECRET: "i" };
+  const store = new Store(env.DB);
+  const RealDate = Date, at = (iso) => { globalThis.Date = class extends RealDate { constructor(...a) { super(...(a.length ? a : [iso])); } static now() { return RealDate.parse(iso); } }; };
+  const health = async () => (await worker.fetch(new Request("https://x/health"), env)).status;
+  try {
+    at("2026-10-19T17:10:00Z");                                                 // Mon 20:10 Kyiv
+    await store.saveLive([], { last: 1, ok: Date.now(), gapTo: 0 });
+    await store.saveHourly("2026-10-19", { as_of: "2026-10-19" });
+    await store.saveForecast("morning", "2026-10-19", { rows: [] });
+    assert.equal(await health(), 200);                                          // the evening one is not due yet
+    at("2026-10-19T17:40:00Z"); await store.saveLive([], { last: 1, ok: Date.now(), gapTo: 0 });
+    assert.equal(await health(), 503);                                          // 20:40, no forecast for Tuesday
+    await store.saveForecast("evening", "2026-10-20", { rows });
+    assert.equal(await health(), 200);
+    await store.saveHourly("2026-09-01", { as_of: "2026-09-01" });
+    await store.db.raw.prepare("DELETE FROM forecasts WHERE kind='hourly' AND day='2026-10-19'").run();
+    assert.equal(await health(), 503);                                          // stale hourly parameters, freshly received
+  } finally { globalThis.Date = RealDate; }
+});
+
+test("audit 6: inherited property names are not screens", async () => {
+  const { r, tg } = setup();
+  await r.handle(cb(uIdx("Київ")));
+  await r.handle(cb("s:__proto__"));
+  await r.handle(cb("s:constructor"));
+  assert.ok(!tg.calls.some((c) => c[0] === "answer" && /Щось пішло/.test(c[2] || "")));
 });

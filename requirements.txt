@@ -7,3 +7,4 @@ matplotlib>=3.8
 truststore>=0.9
 pytest>=8
 shapely>=2.0
+pyyaml>=6.0
