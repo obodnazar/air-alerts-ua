@@ -266,9 +266,12 @@ export function hourText(unit, d, hour, risk, live, seen, offsetMin) {
     parts.push(`Ймовірність, що о ${hh(hour)} буде тривога: <b>${pct(risk.model)}</b>\n${bar(risk.model)} ` +
       `<i>зазвичай о ${hh(hour)}: ${pct(risk.clim)}</i>`);
   } else {
-    parts.push(`📊 <b>Історично</b> о ${hh(hour)} тривога була у <b>${pct(risk.clim)}</b> днів (за останні 28 днів).\n` +
-      (live ? "<i>Це не прогноз: на такий проміжок наша модель не точніша за історію.</i>"
-        : "<i>Без свіжих даних про «зараз» прогноз не рахую, це лише історія.</i>"));
+    // where the model is not better than history, history IS the best estimate: show it as the probability, and say
+    // where it comes from (Nazar, 14 Oct: the screen must always give a percentage)
+    parts.push(`Ймовірність, що о ${hh(hour)} буде тривога: <b>≈${pct(risk.clim)}</b>\n${bar(risk.clim)} ` +
+      `<i>за історією району: о ${hh(hour)} тривога була у ${pct(risk.clim)} з останніх 28 днів</i>\n` +
+      (live ? "<i>Для такого проміжку наша модель не точніша за історію, тому показуємо історичну оцінку.</i>"
+        : "<i>Свіжих даних про «зараз» немає, тому оцінка лише за історією.</i>"));
   }
   parts.push(PLANNING);
   return parts.join("\n\n");

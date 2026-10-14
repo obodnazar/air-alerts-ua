@@ -503,7 +503,8 @@ test("🕐 hour risk: one raion -> day -> hours after now, four to a row -> resu
   const text = lastEdit(tg)[2];
   assert.match(text, /Київ · завтра, 15:00/);
   assert.match(text, /Зараз: тривоги немає/);
-  assert.match(text, /Історично<\/b> о 15:00 тривога була у <b>\d+%<\/b>/); // no alert now: the model never beat history
+  assert.match(text, /Ймовірність, що о 15:00 буде тривога: <b>≈\d+%<\/b>/); // always a percentage (14 Oct)
+  assert.match(text, /за історією району/);                                    // no alert now: history is the estimate
   assert.match(text, /не сигнал безпеки/);
 });
 
@@ -524,7 +525,7 @@ test("🕐 during an alert: shelter first, never a hint to go out; stale data: n
   text = lastEdit(tg)[2];
   assert.match(text, /Немає свіжих даних про тривоги зараз \(останнє оновлення о 13:15\)/);
   assert.doesNotMatch(text, /Зараз: тривоги немає/);
-  assert.match(text, /лише історія/);
+  assert.match(text, /оцінка лише за історією/);
   ({ r, tg } = await hoursSetup({ gapTo: 5 }));
   await r.handle(cb(`hr:${K}:0:15`));
   assert.match(lastEdit(tg)[2], /Немає свіжих даних/);
@@ -823,6 +824,9 @@ test("audit 4: delivery progress is written every 10 sends; a run cut short rese
 });
 
 test("audit 4: /health reports the database and data ages; a too-large history is refused", async () => {
+  const RealDate = Date, iso = "2026-10-13T06:00:00Z";                      // Tue 09:00 Kyiv, a fixed clock
+  globalThis.Date = class extends RealDate { constructor(...a) { super(...(a.length ? a : [iso])); } static now() { return RealDate.parse(iso); } };
+  try {
   const env = { DB: fakeD1(), TELEGRAM_BOT_TOKEN: "x", WEBHOOK_SECRET: "w", INGEST_SECRET: "i" };
   let res = await worker.fetch(new Request("https://x/health"), env);
   assert.equal(res.status, 503);                                               // no scrape, no forecast yet
@@ -838,6 +842,7 @@ test("audit 4: /health reports the database and data ages; a too-large history i
   const big = { max_post_id: 1, since: 1.75e12, data_end: 1.76e12,
     alerts: Array.from({ length: 19000 }, (_, i) => ["Білгород-Дністровський район", 1.75e12 + i, null, "yellow", "yellow"]) };
   assert.equal(invalidAlerts(big), "alerts too large");
+  } finally { globalThis.Date = RealDate; }
 });
 
 // ---------- audit round 5 (Codex, 14 Oct): gaps in the round-4 fixes ----------
