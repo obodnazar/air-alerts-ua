@@ -151,3 +151,16 @@ Everything below was designed **after** the test results were seen. It is report
       - **Calibration:** the model is too low. With an alert on, it gives 57% at 1 h against 61% observed, and 47% against 55% at 2 h; with none, 8.7% against 12.0% at 1 h. Alerts cluster more than independent (Poisson) starts allow. A recalibration is the obvious next step; it is not done here, because it would be tuned on this same backtest.
       - Weekdays and weekends, all leads pooled: +0.6% [+0.3, +1.1] and +0.3% [0.0, +0.9].
     - **Product:** live state comes from the Worker's own 5-minute scrape of t.me/s; the parameters and the gates are published twice a day (`publish.py`), never computed by frequent GitHub Actions runs.
+13. **Hourly risk, version 2: a stacked logistic that knows about waves** (`hourly.py`, `H2`). Asked on 14 Oct: the hour screen should give a model probability, not only history. Item 12 showed why it did not: with no alert now, the model was no better than history, and it was too low everywhere because "alerts cluster more than independent (Poisson) starts allow". Post-hoc by construction, after item 12's results. **This spec, the features and the display rule were written down before the version-2 backtest was run.**
+    - **Target, issue times, leads and buckets:** as in item 12. Hour *h*:00 Kyiv, issued at every whole hour, leads 1–47 h, the same 7 buckets, and "alert on" and "no alert" at issue reported apart.
+    - **Model:** for each (state at issue, lead bucket), a logistic regression
+      logit P = a + b₁·logit(P<sub>H1</sub>) + b₂·logit(clim) + b₃·occ6 + b₄·occ24 + b₅·oblast_on + b₆·country_on [+ b₇·log(1 + elapsed) when an alert is on].
+      - P<sub>H1</sub> is the item-12 model, and clim is its baseline (both clipped to [0.002, 0.998]).
+      - occ6 and occ24 are the share of the last 6 h and 24 h the raion spent under alert (clustering in time).
+      - oblast_on and country_on are the shares of the oblast's served raions and of all served raions under alert at the issue time (a wave in progress).
+      - elapsed is the minutes the current alert has run.
+      - Every feature uses only alerts that started before the issue time T, cut at T.
+    - **Fitting (rolling, no look-ahead):** for issue day *d*, the coefficients are fitted on pairs issued in the 14 days before *d* whose target hour is before 00:00 of *d*. An outcome must be known by then. L2 penalty with C = 1. At most 80 000 training rows per (state, bucket), sampled with a fixed seed. Refitted every day.
+    - **Backtest:** every day 15 Sep → end of data, exactly as item 12. Brier skill vs the same history baseline per (state, bucket), with the paired block bootstrap (3-day blocks, 1 000 resamples) and the two halves. The skill vs H1 is reported too.
+    - **Display rule (unchanged in kind):** for a (state, bucket), the bot shows H2 if its 95% CI vs history is above 0 and both halves are above 0. Otherwise it shows H1 if item 12's gate is open, otherwise history. A negative result is reported as such.
+    - **Calibration:** mean forecast vs observed rate per (state, bucket), to check whether H2 fixes the under-forecast found in item 12.
