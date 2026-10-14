@@ -198,7 +198,9 @@ export async function dailyCleanup(store, now = Date.now()) {
 
 async function ingestExtras(store, body, mark = null) {
   if (body.kind === "hourly") {
-    await store.saveHourly(body.as_of, { as_of: body.as_of, step: body.step, units: body.units, surv: body.surv, gates: body.gates }, mark);
+    // every field the hour screen reads, incl. version 2 (14 Oct: coef and gates2 were dropped here, so v2 never ran)
+    const { as_of, step, units, surv, gates, coef, gates2 } = body;
+    await store.saveHourly(as_of, { as_of, step, units, surv, gates, ...(coef ? { coef, gates2 } : {}) }, mark);
     return { ok: true, units: Object.keys(body.units).length };
   }
   return { ok: true, ...(await store.applySeed(body, Date.now(), mark)) };

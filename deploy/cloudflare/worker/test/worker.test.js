@@ -1029,3 +1029,17 @@ test("audit 7: a long open alert still counts in the 6/24 h occupancy (rows chos
   assert.equal(rows.length, 1);
   assert.equal(occupancy(rows, now, 24), 1);
 });
+
+test("14 Oct: /ingest keeps version 2's coefficients and gates (they were dropped, so v2 never ran live)", async () => {
+  const env = { DB: fakeD1(), TELEGRAM_BOT_TOKEN: "x", WEBHOOK_SECRET: "w", INGEST_SECRET: "i".repeat(32) };
+  const body = { kind: "hourly", ...structuredClone(HOURLY.params), window: "2026-10-14-pm" };
+  for (const u of Object.keys(body.units)) body.units[u].ob = "м. Київ";
+  body.coef = V2.coef;
+  body.gates2 = { buckets: body.gates.buckets, on: body.gates.on, off: body.gates.off };
+  const res = await worker.fetch(new Request("https://x/ingest", { method: "POST", body: JSON.stringify(body),
+    headers: { Authorization: `Bearer ${env.INGEST_SECRET}` } }), env);
+  assert.equal(res.status, 200);
+  const saved = await new Store(env.DB).hourlyParams();
+  assert.deepEqual(saved.coef, V2.coef);
+  assert.deepEqual(saved.gates2.off, body.gates2.off);
+});
