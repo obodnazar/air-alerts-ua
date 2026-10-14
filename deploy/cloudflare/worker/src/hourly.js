@@ -51,9 +51,44 @@ export function bucketOf(buckets, leadHours) {
   return i < 0 ? buckets.length - 1 : i;
 }
 
+// ---------- version 2 (PREREG 13): logistic on top of H1 with wave features (hourly.design / predict_v2) ----------
+const P_CLIP = 0.002;
+export const logit = (p) => { const q = Math.min(1 - P_CLIP, Math.max(P_CLIP, p)); return Math.log(q / (1 - q)); };
+
+/** Share of the `hours` before now the raion spent under alert; rows: its alerts {started, ended|null} (ms). The
+ *  union of intervals, cut at now (Python measures merged chains; overlaps are merged here the same way). */
+export function occupancy(rows, now, hours) {
+  const lo = now - hours * 3600000;
+  const iv = rows.filter((r) => r.started < now).map((r) => [Math.max(r.started, lo), Math.min(r.ended ?? now, now)])
+    .filter(([a, b]) => b > a).sort((p, q) => p[0] - q[0]);
+  let total = 0, curA = null, curB = null;
+  for (const [a, b] of iv) {
+    if (curB === null || a > curB) { if (curB !== null) total += curB - curA; curA = a; curB = b; } else curB = Math.max(curB, b);
+  }
+  if (curB !== null) total += curB - curA;
+  return Math.min(1, total / (hours * 3600000));
+}
+
+/** occ6, occ24, oblast_on, country_on at now. onUnits: Set of raions with an alert on now (live scrape). */
+export function waveFeatures(params, unit, unitRows, onUnits, now) {
+  const names = Object.keys(params.units), ob = params.units[unit].ob;
+  const same = names.filter((u) => params.units[u].ob === ob);
+  const share = (list) => (list.length ? list.filter((u) => onUnits.has(u)).length / list.length : 0);
+  return { occ6: occupancy(unitRows, now, 6), occ24: occupancy(unitRows, now, 24), oblast_on: share(same), country_on: share(names) };
+}
+
+/** predict_v2 for one forecast. coef = [a, b_h1, b_clim, b_occ6, b_occ24, b_oblast, b_country(, b_elapsed)]. */
+export function forecastV2(coef, p1, clim, f, on, elapsed) {
+  const x = [logit(p1), logit(clim), f.occ6, f.occ24, f.oblast_on, f.country_on, ...(on ? [Math.log1p(Math.max(0, elapsed))] : [])];
+  let z = coef[0];
+  for (let i = 0; i < x.length; i++) z += coef[i + 1] * x[i];
+  return 1 / (1 + Math.exp(-z));
+}
+
 /** Everything the hour screen needs. params: the /ingest "hourly" body; live: {on, elapsed} or null if the live
- *  state is unknown (stale scrape): then only the historical share is given. */
-export function hourRisk(params, unit, day, hour, now, live) {
+ *  state is unknown (stale scrape): then only the historical share is given. feats: waveFeatures() or null.
+ *  Shown: version 2 where its gate is open, else version 1 where its gate is open, else history. */
+export function hourRisk(params, unit, day, hour, now, live, feats = null) {
   const u = params?.units?.[unit];
   if (!u) return null;
   const x = kyivToUtc(day, hour), step = params.step || 10;
@@ -63,10 +98,13 @@ export function hourRisk(params, unit, day, hour, now, live) {
   if (lead <= 0) return { past: true, clim };
   const steps = Math.min(Math.floor(lead / step), surv.length - 1);
   const b = bucketOf(params.gates.buckets, lead / 60);
-  const out = { clim, lead, bucket: b, x, model: null };
+  const out = { clim, lead, bucket: b, x, model: null, version: null };
   if (!live) return out;
-  if (!params.gates[live.on ? "on" : "off"][b]) return out; // here the model is not better than history
+  const state = live.on ? "on" : "off";
   const c = coverageShare(u.prof, surv, x, step);
-  out.model = Math.min(1, Math.max(0, forecastOne(clim, c, surv, live.on, live.elapsed, steps, step)));
+  const p1 = Math.min(1, Math.max(0, forecastOne(clim, c, surv, live.on, live.elapsed, steps, step)));
+  const coef = params.coef?.[state]?.[b];
+  if (feats && coef && params.gates2?.[state]?.[b]) { out.model = forecastV2(coef, p1, clim, feats, live.on, live.elapsed); out.version = 2; }
+  else if (params.gates[state][b]) { out.model = p1; out.version = 1; } // here the model is better than history
   return out;
 }

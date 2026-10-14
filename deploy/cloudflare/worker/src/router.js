@@ -3,7 +3,7 @@ import * as ui from "./ui.js";
 import { search } from "./catalog.js";
 import { MAX_UNITS } from "./store.js";
 import { toInt, kyivNow, addDays, weekday } from "./util.js";
-import { hourRisk, kyivOffset, kyivToUtc } from "./hourly.js";
+import { hourRisk, kyivOffset, kyivToUtc, waveFeatures } from "./hourly.js";
 import { liveState } from "./live.js";
 
 export class Router {
@@ -50,9 +50,12 @@ export class Router {
     if (hour === null || hour < 0 || hour > 23) return null;
     const day = addDays(k.day, d);
     if (kyivToUtc(day, hour) <= now.getTime()) return "Ця година вже минула.";
-    const [params, meta, open] = await Promise.all([this.store.hourlyParams(), this.store.liveMeta(), this.store.openAlerts([unit])]);
-    const t = now.getTime(), live = liveState(meta, open[0], t);
-    const risk = hourRisk(params, unit, day, hour, t, live);
+    const t = now.getTime();
+    const [params, meta, open, rows] = await Promise.all([this.store.hourlyParams(), this.store.liveMeta(),
+      this.store.openAlerts(), this.store.unitRecent(unit, t)]);
+    const live = liveState(meta, open.find((r) => r.unit === unit), t);
+    const feats = live && params?.units?.[unit]?.ob ? waveFeatures(params, unit, rows, new Set(open.map((r) => r.unit)), t) : null;
+    const risk = hourRisk(params, unit, day, hour, t, live, feats);
     await this.tg.edit(chat, mid, ui.hourText(unit, d, hour, risk, live, meta.ok, kyivOffset(t)), ui.hourResultKeyboard(i, d));
     return null;
   }

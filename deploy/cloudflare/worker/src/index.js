@@ -91,6 +91,15 @@ export function invalidHourly(b, units = new Set(catalog.units)) {
   if (!g || !Array.isArray(g.buckets) || !g.buckets.length || g.buckets.length > 24
     || !g.buckets.every((x) => isArr(x, 2, (v) => Number.isInteger(v) && v >= 1 && v <= 48) && x[0] <= x[1])) return "gates";
   for (const k of ["on", "off"]) if (!isArr(g[k], g.buckets.length, (v) => typeof v === "boolean")) return "gates";
+  // version 2 (PREREG 13), optional: oblast per raion, logistic coefficients and their gates per (state, bucket)
+  if (b.coef !== undefined || b.gates2 !== undefined) {
+    const n = g.buckets.length, okCoef = (len) => (c) => c === null || isArr(c, len, (v) => isNum(v, -50, 50));
+    if (!b.coef || !isArr(b.coef.off, n, okCoef(7)) || !isArr(b.coef.on, n, okCoef(8))) return "coef";
+    const g2 = b.gates2;
+    if (!g2 || JSON.stringify(g2.buckets) !== JSON.stringify(g.buckets)
+      || !["on", "off"].every((k) => isArr(g2[k], n, (v) => typeof v === "boolean"))) return "gates2";
+    if (names.some((u) => typeof b.units[u].ob !== "string" || b.units[u].ob.length > 80)) return "ob";
+  }
   return null;
 }
 

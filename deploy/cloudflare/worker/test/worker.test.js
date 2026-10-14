@@ -978,3 +978,35 @@ test("audit 6: inherited property names are not screens", async () => {
   await r.handle(cb("s:constructor"));
   assert.ok(!tg.calls.some((c) => c[0] === "answer" && /Щось пішло/.test(c[2] || "")));
 });
+
+// ---------- hourly risk version 2 (PREREG 13, 14 Oct): logistic with wave features ----------
+import { forecastV2, occupancy, waveFeatures } from "../src/hourly.js";
+const V2 = fixture("hourly_v2_parity.json");
+
+test("v2: forecastV2 equals Python's predict_v2 on 80 real rows; occupancy equals Python on raw intervals", () => {
+  for (const c of V2.cases) {
+    const coef = V2.coef[c.on ? "on" : "off"][c.bucket];
+    const p = coef ? forecastV2(coef, c.p1, c.clim, c, c.on, c.elapsed) : c.p1;
+    assert.ok(Math.abs(p - c.p2) < 1e-6, `${p} vs ${c.p2}`);
+  }
+  for (const o of V2.occupancy) {
+    assert.ok(Math.abs(occupancy(o.rows, o.now, 6) - o.occ6) < 1e-9, `${o.unit} occ6`);
+    assert.ok(Math.abs(occupancy(o.rows, o.now, 24) - o.occ24) < 1e-9, `${o.unit} occ24`);
+  }
+});
+
+test("v2: the hour screen uses v2 where its gate is open, else v1, else history", () => {
+  const params = structuredClone(HOURLY.params);
+  for (const u of Object.keys(params.units)) params.units[u].ob = u === "Київ" ? "м. Київ" : "інша";
+  params.coef = V2.coef;
+  params.gates2 = { buckets: params.gates.buckets, on: params.gates.buckets.map(() => false), off: params.gates.buckets.map((_, i) => i === 0) };
+  const now = Date.parse("2026-10-12T11:20:00Z"), day = "2026-10-12";
+  const feats = waveFeatures(params, "Київ", [], new Set(), now);
+  const off = { on: false, elapsed: 0 }, on = { on: true, elapsed: 30 };
+  assert.equal(hourRisk(params, "Київ", day, 15, now, off, feats).version, 2);     // 40 min ahead, no alert: v2
+  assert.equal(hourRisk(params, "Київ", day, 15, now, off, null).version, null);   // no wave features: history
+  const r = hourRisk(params, "Київ", day, 15, now, on, feats);                    // alert on: v2 gate closed
+  assert.equal(r.version, params.gates.on[r.bucket] ? 1 : null);
+  assert.equal(hourRisk(params, "Київ", day, 15, now, null, feats).model, null);   // stale live data: history only
+  assert.deepEqual(Object.keys(feats).sort(), ["country_on", "oblast_on", "occ24", "occ6"]);
+});

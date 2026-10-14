@@ -193,6 +193,11 @@ export class Store {
     ]);
     return { rows: seed.alerts.length, removed: gone.length, newer: !!newer };
   }
+  /** One raion's alerts that touch the last 24 h (wave features of the hour model; PK prefix, a few rows). */
+  async unitRecent(unit, now) {
+    return (await this.q(`SELECT started, ended FROM alerts WHERE unit=? AND started >= ? AND started < ?`,
+      unit, now - 48 * 3600000, now).all()).results;
+  }
   /** The last n alerts of each unit, and today's count and minutes under alert (since dayStart, Kyiv midnight). */
   async recent(units, dayStart, now, n = 5) {
     const u = JSON.stringify(units);

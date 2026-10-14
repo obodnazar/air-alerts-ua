@@ -164,3 +164,22 @@ Everything below was designed **after** the test results were seen. It is report
     - **Backtest:** every day 15 Sep → end of data, exactly as item 12. Brier skill vs the same history baseline per (state, bucket), with the paired block bootstrap (3-day blocks, 1 000 resamples) and the two halves. The skill vs H1 is reported too.
     - **Display rule (unchanged in kind):** for a (state, bucket), the bot shows H2 if its 95% CI vs history is above 0 and both halves are above 0. Otherwise it shows H1 if item 12's gate is open, otherwise history. A negative result is reported as such.
     - **Calibration:** mean forecast vs observed rate per (state, bucket), to check whether H2 fixes the under-forecast found in item 12.
+    - **Result** (run once, 14 Oct ~15:00; rolling 15 Sep – 13 Oct, 104 units, 2.6 M forecasts; `results/posthoc_hourly_v2_summary.csv`, gates in `results/hourly_gates_v2.json`). The window now ends on 13 Oct (item 12 ended on 12 Oct), because the data reach 13 Oct 17:25 UTC.
+
+      | state at issue | lead | alert rate | mean forecast H1 → H2 | H2 vs history [95% CI] | halves | H2 vs H1 | shown |
+      |---|---|---|---|---|---|---|---|
+      | alert on | 1 h | 60% | 57% → 61% | **+19.7%** [+10.9, +27.6] | +21.2 / +18.2 | +5.3% | H2 |
+      | alert on | 2 h | 54% | 47% → 54% | **+13.0%** [+7.1, +18.5] | +13.1 / +13.0 | +5.7% | H2 |
+      | alert on | 3 h | 53% | 44% → 53% | **+9.8%** [+4.9, +14.5] | +9.9 / +9.7 | +5.4% | H2 |
+      | alert on | 4–6 h | 51% | 43% → 51% | **+6.4%** [+3.8, +8.9] | +6.6 / +6.3 | +4.4% | H2 |
+      | alert on | 7–12 h | 49% | 43% → 49% | **+2.7%** [+0.2, +5.0] | +1.9 / +3.4 | +2.3% | H2 |
+      | alert on | 13–47 h | 47–48% | | +1.0 … +1.9%, CIs include 0 | | | history |
+      | no alert | 1 h | 12% | 8.7% → 11.7% | **+7.1%** [+4.8, +9.9] | +5.8 / +8.3 | +5.5% | H2 |
+      | no alert | 2 h | 14% | 11.6% → 13.7% | **+4.3%** [+2.6, +6.6] | +2.8 / +5.7 | +4.0% | H2 |
+      | no alert | 3 h | 14% | | **+3.9%** [+2.1, +6.0] | +2.4 / +5.2 | +3.2% | H2 |
+      | no alert | 4–6 h | 15% | | **+2.9%** [+1.1, +5.0] | +1.7 / +4.0 | +2.5% | H2 |
+      | no alert | 7–12 h | 16% | | **+1.6%** [+0.2, +3.1] | +0.9 / +2.3 | +1.5% | H2 |
+      | no alert | 13–47 h | 16–17% | | +0.2 … +0.8%, CIs include 0 | | | history |
+
+      - **What this means:** the wave features (how much of the last 6/24 h the raion spent under alert, and how much of the oblast and the country is under alert now) and the recalibration fix item 12's under-forecast. The mean forecast now matches the observed rate. For the first time the model also beats history **with no alert now**, up to 12 h ahead. Beyond 12 h nothing beats "how often there was an alert at that hour in the last 4 weeks".
+      - **Caveats:** post-hoc; the same 4 weeks as item 12 plus one new day; the effect sizes are small beyond 3 h. Only 13 Oct is fully new data. The Worker computes the same formula from its own live scrape, so live wave features can differ slightly from the backtest's: `test/fixtures/hourly_v2_parity.json` checks the formula and the occupancy against Python.

@@ -152,7 +152,8 @@ def hourly_inputs(store, units, day, T):
     el = _minute(T) - start[:, 0]
     p = [H.forecast(par, np.arange(len(units)), on[:, 0], el, x, int(round((x - _minute(T)) / H.STEP)))
          for x in targets if x > _minute(T)]
-    return par, on[:, 0], np.nan_to_num(el, nan=-1), np.array(p)
+    wave = H.wave_features(store, units, _minute(T), on[:, 0])   # version 2 (PREREG 13): occ6, occ24, oblast/country on
+    return (par, on[:, 0], np.nan_to_num(el, nan=-1), np.array(p), *[wave[k] for k in ("occ6", "occ24", "oblast_on", "country_on")])
 
 
 @pytest.mark.parametrize("day", ["2026-09-23", "2026-10-04"])  # a weekday and a Sunday

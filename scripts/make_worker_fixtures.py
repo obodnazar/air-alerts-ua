@@ -94,9 +94,35 @@ def hourly() -> None:
     print("hourly:", len(cases), "cases")
 
 
+def hourly_v2() -> None:
+    """Version 2 (PREREG 13): coefficients, rows with their inputs and Python's predict_v2, and occupancy from raw
+    alert intervals, so the Worker's forecastV2 and occupancy are checked against the reference."""
+    store = build_store(Path("data/raw/vadimkin/official_data_uk.csv"), Path("data/interim/telegram_episodes.parquet"))
+    units = eligible_units(store)
+    day = pd.Timestamp("2026-10-11")
+    coef = H.coef_asof(store, units, day)
+    rows = H.day_pairs(store, units, day, H.minute(store.coverage[1])).sample(80, random_state=0).reset_index(drop=True)
+    rows["p2"] = H.predict_v2(coef, rows)
+    cases = [dict(on=bool(r.on), bucket=int(r.bucket), p1=float(r.p1), clim=float(r.clim), elapsed=float(r.elapsed),
+                  occ6=float(r.occ6), occ24=float(r.occ24), oblast_on=float(r.oblast_on), country_on=float(r.country_on),
+                  p2=float(r.p2)) for r in rows.itertuples()]
+    occ = []
+    for u in ["Київ", "Харківський район", "Сумський район"]:
+        for T in (H.kyiv_minute(day, 9), H.kyiv_minute(day, 21) + 37):
+            s, e = store.starts[u], store.ends[u]
+            m = (s >= T - 48 * 60) & (s < T)
+            iv = [dict(started=int(a * MS), ended=None if b > T else int(b * MS)) for a, b in zip(s[m], e[m])]
+            v = H.occupancy(store, [u], T, 6)[0], H.occupancy(store, [u], T, 24)[0]
+            occ.append(dict(unit=u, now=int(T * MS), rows=iv, occ6=float(v[0]), occ24=float(v[1])))
+    (OUT / "hourly_v2_parity.json").write_text(json.dumps(dict(coef=coef, cases=cases, occupancy=occ), ensure_ascii=False),
+                                              encoding="utf-8")
+    print("hourly v2:", len(cases), "cases,", len(occ), "occupancy checks")
+
+
 if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
     signal()
     if len(sys.argv) > 1:
         page(Path(sys.argv[1]))
     hourly()
+    hourly_v2()

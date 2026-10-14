@@ -287,17 +287,175 @@ def gates(summary: pd.DataFrame) -> dict:
     return out
 
 
+# ---------- version 2 (PREREG item 13): a stacked logistic with wave features ----------
+
+TRAIN_DAYS, MAX_TRAIN, P_CLIP = 14, 80_000, 0.002
+FEATURES = ["l_h1", "l_clim", "occ6", "occ24", "oblast_on", "country_on"]   # + "l_elapsed" when an alert is on
+GATES2 = Path("results/hourly_gates_v2.json")
+COEF = Path("results/hourly_coef_v2.json")
+
+
+def logit(p: np.ndarray) -> np.ndarray:
+    p = np.clip(np.asarray(p, dtype=float), P_CLIP, 1 - P_CLIP)
+    return np.log(p / (1 - p))
+
+
+def occupancy(store: Store, units: list[str], t: float, hours: int) -> np.ndarray:
+    """Share of the `hours` before t each unit spent under alert. Only chains that started before t, cut at t: what
+    was known at t (a chain is at most 24 h long, so older ones cannot overlap the window)."""
+    lo, out = t - hours * 60, np.zeros(len(units))
+    for i, u in enumerate(units):
+        s, e = store.starts[u], store.ends[u]
+        a, b = np.searchsorted(s, lo - CAP * STEP), np.searchsorted(s, t)
+        if b > a:
+            out[i] = np.clip(np.minimum(e[a:b], t) - np.maximum(s[a:b], lo), 0, None).sum() / (hours * 60)
+    return np.clip(out, 0, 1)
+
+
+def wave_features(store: Store, units: list[str], t: float, on: np.ndarray) -> dict:
+    """occ6, occ24, oblast_on, country_on for every unit at time t (on: state at t, from state_at)."""
+    ob = np.array([store.oblast_of[u] for u in units])
+    oblast_on = np.zeros(len(units))
+    for o in np.unique(ob):
+        m = ob == o
+        oblast_on[m] = on[m].mean()
+    return dict(occ6=occupancy(store, units, t, 6), occ24=occupancy(store, units, t, 24),
+                oblast_on=oblast_on, country_on=np.full(len(units), on.mean()))
+
+
+def design(p_h1, clim, feats: dict, elapsed, on_state: bool) -> np.ndarray:
+    cols = [logit(p_h1), logit(clim), feats["occ6"], feats["occ24"], feats["oblast_on"], feats["country_on"]]
+    if on_state:
+        cols.append(np.log1p(np.clip(elapsed, 0, None)))
+    return np.column_stack(cols)
+
+
+def day_pairs(store: Store, units: list[str], d: pd.Timestamp, end_min: float, every: int = 1) -> pd.DataFrame:
+    """Every (issue hour of day d, unit, target hour) pair the data can score: H1, history, wave features, outcome."""
+    par = params_asof(store, units, d)
+    targets = [(dd, h) for dd in (d, d + pd.Timedelta(1, "D")) for h in range(24)]
+    tmin = np.array([kyiv_minute(dd, h) for dd, h in targets])
+    tmin = tmin[tmin <= end_min]
+    y_all, _ = state_at(store, units, tmin)
+    c_all = {k: coverage_share(par["prof"], par["surv"], x) for k, x in enumerate(tmin)}
+    hx_all = kyiv_hours(tmin)
+    idx, out = np.arange(len(units)), []
+    for h0 in range(0, 24, every):
+        T = kyiv_minute(d, h0)
+        if T >= end_min:
+            break
+        on, st = state_at(store, units, np.array([T]))
+        on, el = on[:, 0], T - st[:, 0]
+        f = wave_features(store, units, T, on)
+        for k, x in enumerate(tmin):
+            if x <= T:
+                continue
+            steps = int(round((x - T) / STEP))
+            if steps > GRID:
+                continue
+            p1 = forecast(par, idx, on, el, x, steps, c=c_all[k])
+            out.append(pd.DataFrame(dict(day=d, T=T, x=x, unit=idx, on=on, bucket=bucket_of((x - T) / 60),
+                                         y=y_all[:, k].astype(np.float32), p1=p1.astype(np.float32),
+                                         clim=par["clim"][:, hx_all[k]].astype(np.float32),
+                                         elapsed=np.where(on, el, 0).astype(np.float32),
+                                         **{n: v.astype(np.float32) for n, v in f.items()})))
+    return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
+
+
+def fit_v2(train: pd.DataFrame, seed: int = 0) -> dict:
+    """Coefficients per (state, bucket) from pairs whose outcome is known. Missing or one-class cells -> None
+    (the caller falls back to H1)."""
+    from sklearn.linear_model import LogisticRegression
+
+    coef = {"on": [None] * len(BUCKETS), "off": [None] * len(BUCKETS)}
+    for (on_state, b), g in train.groupby(["on", "bucket"]):
+        if len(g) > MAX_TRAIN:
+            g = g.sample(MAX_TRAIN, random_state=seed)
+        if len(g) < 200 or g.y.nunique() < 2:
+            continue
+        X = design(g.p1, g.clim, g, g.elapsed, bool(on_state))
+        m = LogisticRegression(C=1.0, max_iter=500).fit(X, g.y.astype(int))
+        coef["on" if on_state else "off"][int(b)] = [float(m.intercept_[0]), *map(float, m.coef_[0])]
+    return coef
+
+
+def predict_v2(coef: dict, rows: pd.DataFrame) -> np.ndarray:
+    p = rows.p1.to_numpy(dtype=float).copy()
+    for (on_state, b), g in rows.groupby(["on", "bucket"]):
+        c = coef["on" if on_state else "off"][int(b)]
+        if c is None:
+            continue
+        X = design(g.p1, g.clim, g, g.elapsed, bool(on_state))
+        p[g.index.to_numpy()] = 1 / (1 + np.exp(-(c[0] + X @ np.array(c[1:]))))
+    return p
+
+
+def backtest_v2(store: Store, units: list[str], start: str = EVAL_FROM) -> pd.DataFrame:
+    """Rolling: day d is predicted with coefficients fitted on the 14 days before it, outcomes known by d 00:00."""
+    end_min = minute(store.coverage[1])
+    last = (store.coverage[1].tz_convert(KYIV_TZ) - pd.Timedelta(hours=1)).normalize().tz_localize(None)
+    first = pd.Timestamp(start) - pd.Timedelta(TRAIN_DAYS, "D")
+    pairs = {d: day_pairs(store, units, d, end_min) for d in pd.date_range(first, last, freq="D")}
+    recs = []
+    for d in pd.date_range(start, last, freq="D"):
+        cut = kyiv_minute(d, 0)
+        hist = pd.concat([pairs[d - pd.Timedelta(k, "D")] for k in range(TRAIN_DAYS, 0, -1)], ignore_index=True)
+        coef = fit_v2(hist[hist.x < cut], seed=int(d.strftime("%Y%m%d")))
+        rows = pairs[d].reset_index(drop=True)
+        p2 = predict_v2(coef, rows)
+        y, p1, cl = rows.y.to_numpy(float), rows.p1.to_numpy(float), rows.clim.to_numpy(float)
+        g = pd.DataFrame(dict(state=np.where(rows.on, "on", "off"), bucket=rows.bucket, n=1, y=y,
+                              se_model=(p2 - y) ** 2, se_h1=(p1 - y) ** 2, se_clim=(cl - y) ** 2,
+                              p_model=p2, p_h1=p1, p_clim=cl))
+        recs.append(g.groupby(["state", "bucket"], as_index=False).sum().assign(day=d))
+    return pd.concat(recs, ignore_index=True)
+
+
+def coef_asof(store: Store, units: list[str], day: pd.Timestamp, every: int = 3) -> dict:
+    """What the publisher sends: coefficients fitted on the 14 days before `day` (issue hours every 3 h to keep
+    a GitHub Actions run short; the backtest uses every hour)."""
+    day = pd.Timestamp(day).normalize()
+    end_min, cut = kyiv_minute(day, 0), kyiv_minute(day, 0)
+    hist = pd.concat([day_pairs(store, units, day - pd.Timedelta(k, "D"), end_min, every)
+                      for k in range(TRAIN_DAYS, 0, -1)], ignore_index=True)
+    return fit_v2(hist[hist.x < cut], seed=int(day.strftime("%Y%m%d")))
+
+
+def main_v2() -> None:
+    store = build_store(Path("data/raw/vadimkin/official_data_uk.csv"), Path("data/interim/telegram_episodes.parquet"))
+    units = eligible_units(store)
+    daily = backtest_v2(store, units)
+    daily.to_csv("results/posthoc_hourly_v2_daily.csv", index=False)
+    summary = summarise(daily)
+    vs_h1 = summarise(daily.assign(se_clim=daily.se_h1))[["state", "bucket", "bss", "ci_lo", "ci_hi"]]
+    summary = summary.merge(vs_h1.rename(columns={"bss": "bss_vs_h1", "ci_lo": "vs_h1_lo", "ci_hi": "vs_h1_hi"}),
+                            on=["state", "bucket"])
+    h1 = daily.groupby(["state", "bucket"]).apply(lambda g: g.p_h1.sum() / g.n.sum(), include_groups=False)
+    summary["mean_p_h1"] = [h1[(s, b)] for s, b in zip(summary.state, summary.bucket)]
+    summary.to_csv("results/posthoc_hourly_v2_summary.csv", index=False)
+    GATES2.write_text(json.dumps(gates(summary), indent=1) + "\n", encoding="utf-8")
+    print(f"hourly risk v2 (PREREG 13), rolling {EVAL_FROM} → {daily.day.max():%Y-%m-%d}, {len(units)} units")
+    print(summary[["state", "lead", "n", "alert_rate", "mean_p_h1", "mean_p_model", "bss", "ci_lo", "ci_hi",
+                   "bss_first_half", "bss_second_half", "bss_vs_h1", "show_model"]].round(4).to_string(index=False))
+
+
 # ---------- what the publisher sends ----------
 
-def payload(store: Store, units: list[str], day: pd.Timestamp, gate: dict | None = None) -> dict:
-    """Per-raion parameters for the Worker: climatology and start profile by hour, the duration curve, the gates."""
+def payload(store: Store, units: list[str], day: pd.Timestamp, gate: dict | None = None, v2: bool = True) -> dict:
+    """Per-raion parameters for the Worker: climatology and start profile by hour, the duration curve, the gates;
+    version 2 (PREREG 13): each raion's oblast, the logistic coefficients fitted on the 14 days before `day`, its gates."""
     par = params_asof(store, units, day)
     gate = gate or json.loads(GATES.read_text(encoding="utf-8"))
     prof = par["prof"] / par["prof"].sum(axis=1, keepdims=True)
-    return dict(as_of=pd.Timestamp(day).strftime("%Y-%m-%d"), step=STEP,
-                units={u: dict(clim=[round(float(x), 4) for x in par["clim"][i]],
-                               prof=[round(float(x), 5) for x in prof[i]]) for i, u in enumerate(units)},
-                surv=[round(float(x), 5) for x in par["surv"]], gates=gate)
+    out = dict(as_of=pd.Timestamp(day).strftime("%Y-%m-%d"), step=STEP,
+               units={u: dict(clim=[round(float(x), 4) for x in par["clim"][i]],
+                              prof=[round(float(x), 5) for x in prof[i]], ob=store.oblast_of[u]) for i, u in enumerate(units)},
+               surv=[round(float(x), 5) for x in par["surv"]], gates=gate)
+    if v2 and GATES2.exists():
+        out["coef"] = {k: [None if c is None else [round(x, 6) for x in c] for c in v]
+                       for k, v in coef_asof(store, units, day).items()}
+        out["gates2"] = json.loads(GATES2.read_text(encoding="utf-8"))
+    return out
 
 
 def main() -> None:
@@ -321,4 +479,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    main_v2() if "--v2" in sys.argv else main()
