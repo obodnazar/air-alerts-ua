@@ -195,8 +195,9 @@ export class Store {
   }
   /** One raion's alerts that touch the last 24 h (wave features of the hour model; PK prefix, a few rows). */
   async unitRecent(unit, now) {
-    return (await this.q(`SELECT started, ended FROM alerts WHERE unit=? AND started >= ? AND started < ?`,
-      unit, now - 48 * 3600000, now).all()).results;
+    // by overlap with the window, not by start: an alert that began 60 h ago and is still on counts (audit 7)
+    return (await this.q(`SELECT started, ended FROM alerts WHERE unit=? AND started < ? AND (ended IS NULL OR ended > ?)`,
+      unit, now, now - 24 * 3600000).all()).results;
   }
   /** The last n alerts of each unit, and today's count and minutes under alert (since dayStart, Kyiv midnight). */
   async recent(units, dayStart, now, n = 5) {

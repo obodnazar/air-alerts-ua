@@ -18,4 +18,6 @@ $PY -m airalerts.cost
 $PY -m airalerts.clearance
 $PY -m airalerts.figures
 $PY scripts/check_results.py /tmp/air-alerts-committed-summary.json
+# post-hoc hourly risk v2 (PREREG 13): recomputed on its own data snapshot and compared, not overwritten
+$PY -m airalerts.hourly --v2 --episodes data/snapshot/telegram_episodes_2026-10-13.parquet --check
 echo "done: results/ and figures/ regenerated"

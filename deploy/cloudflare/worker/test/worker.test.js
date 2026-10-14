@@ -386,7 +386,7 @@ test("hourly: the Kyiv offset rule equals Intl for every hour of 2026 and 2027",
 });
 
 test("hourly: the model is shown only where the backtest earned it; no live data -> history only", () => {
-  const { params } = HOURLY, now = Date.parse("2026-10-12T11:20:00Z"); // 14:20 Kyiv
+  const { params } = HOURLY, now = Date.parse("2026-10-12T11:00:00Z"); // 14:00 Kyiv: 15:00 is exactly 1 h ahead
   const on = hourRisk(params, "Київ", "2026-10-12", 15, now, { on: true, elapsed: 30 });
   assert.ok(on.model > 0 && on.bucket === 0);                                     // alert on, 1 h: model
   assert.equal(hourRisk(params, "Київ", "2026-10-12", 15, now, { on: false, elapsed: 0 }).model, null); // no alert: history
@@ -394,6 +394,17 @@ test("hourly: the model is shown only where the backtest earned it; no live data
   assert.equal(hourRisk(params, "Київ", "2026-10-12", 15, now, null).model, null);     // stale live data
   assert.ok(hourRisk(params, "Київ", "2026-10-12", 14, now, null).past);
   assert.equal(hourRisk(params, "Неіснуючий район", "2026-10-12", 15, now, null), null);
+});
+
+test("audit 7: under 1 h ahead no model (backtested from 1 h); old parameters -> history; each reason is named", () => {
+  const { params } = HOURLY;
+  const short = hourRisk(params, "Київ", "2026-10-12", 15, Date.parse("2026-10-12T11:59:00Z"), { on: true, elapsed: 30 });
+  assert.deepEqual([short.model, short.reason], [null, "short"]);                  // 1 min ahead
+  const old = hourRisk({ ...params, as_of: "2026-09-01" }, "Київ", "2026-10-12", 16, Date.parse("2026-10-12T11:00:00Z"), { on: true, elapsed: 30 });
+  assert.deepEqual([old.model, old.reason], [null, "stale_params"]);
+  assert.equal(hourRisk(params, "Київ", "2026-10-12", 16, Date.parse("2026-10-12T11:00:00Z"), null).reason, "stale_live");
+  const t = ui.hourText("Київ", 0, 15, short, { on: false }, Date.parse("2026-10-12T11:55:00Z"), 180);
+  assert.match(t, /менше години/); assert.match(t, /28 днів до 11\.10/);
 });
 
 test("live: 5-minute ticks over 600 real posts end with Python's episodes for the served raions", async () => {
@@ -511,23 +522,23 @@ test("🕐 hour risk: one raion -> day -> hours after now, four to a row -> resu
 test("🕐 during an alert: shelter first, never a hint to go out; stale data: no claim about now", async () => {
   const open = { unit: "Київ", started: LIVE_OK - 40 * MINUTE, ended: null, level: "red", max_level: "red" };
   let { r, tg } = await hoursSetup({ open });
-  await r.handle(cb(`hr:${K}:0:15`));
+  await r.handle(cb(`hr:${K}:0:16`));
   let text = lastEdit(tg)[2];
   assert.match(text, /Зараз у районі тривога<\/b> \(червона\)/);
   assert.match(text, /Будьте в укритті й слухайте офіційні сповіщення/);
-  assert.match(text, /Ймовірність, що о 15:00 буде тривога: <b>\d+%<\/b>/);  // 1 h ahead with an alert on: the model
+  assert.match(text, /Ймовірність, що о 16:00 буде тривога: <b>\d+%<\/b>/);  // 1 h 40 min ahead with an alert on: the model
   for (const t of [text, ui.hourText("Київ", 0, 15, { clim: 0.01, model: 0.01 }, { on: true, elapsed: 5, level: "yellow" }, LIVE_OK, 180)]) {
     assert.doesNotMatch(t, /можна виходити|виходьте|безпечно|йдіть гуляти/i);
     assert.match(t, /Будьте в укритті/);
   }
   ({ r, tg } = await hoursSetup({ open, ok: LIVE_OK - 60 * MINUTE }));
-  await r.handle(cb(`hr:${K}:0:15`));
+  await r.handle(cb(`hr:${K}:0:16`));
   text = lastEdit(tg)[2];
   assert.match(text, /Немає свіжих даних про тривоги зараз \(останнє оновлення о 13:15\)/);
   assert.doesNotMatch(text, /Зараз: тривоги немає/);
   assert.match(text, /оцінка лише за історією/);
   ({ r, tg } = await hoursSetup({ gapTo: 5 }));
-  await r.handle(cb(`hr:${K}:0:15`));
+  await r.handle(cb(`hr:${K}:0:16`));
   assert.match(lastEdit(tg)[2], /Немає свіжих даних/);
 });
 
@@ -1000,13 +1011,21 @@ test("v2: the hour screen uses v2 where its gate is open, else v1, else history"
   for (const u of Object.keys(params.units)) params.units[u].ob = u === "Київ" ? "м. Київ" : "інша";
   params.coef = V2.coef;
   params.gates2 = { buckets: params.gates.buckets, on: params.gates.buckets.map(() => false), off: params.gates.buckets.map((_, i) => i === 0) };
-  const now = Date.parse("2026-10-12T11:20:00Z"), day = "2026-10-12";
+  const now = Date.parse("2026-10-12T11:00:00Z"), day = "2026-10-12";                // 14:00 Kyiv
   const feats = waveFeatures(params, "Київ", [], new Set(), now);
   const off = { on: false, elapsed: 0 }, on = { on: true, elapsed: 30 };
-  assert.equal(hourRisk(params, "Київ", day, 15, now, off, feats).version, 2);     // 40 min ahead, no alert: v2
+  assert.equal(hourRisk(params, "Київ", day, 15, now, off, feats).version, 2);     // 1 h ahead, no alert: v2
   assert.equal(hourRisk(params, "Київ", day, 15, now, off, null).version, null);   // no wave features: history
   const r = hourRisk(params, "Київ", day, 15, now, on, feats);                    // alert on: v2 gate closed
   assert.equal(r.version, params.gates.on[r.bucket] ? 1 : null);
   assert.equal(hourRisk(params, "Київ", day, 15, now, null, feats).model, null);   // stale live data: history only
   assert.deepEqual(Object.keys(feats).sort(), ["country_on", "oblast_on", "occ24", "occ6"]);
+});
+
+test("audit 7: a long open alert still counts in the 6/24 h occupancy (rows chosen by overlap, not by start)", async () => {
+  const store = new Store(fakeD1()), now = Date.parse("2026-10-14T12:00:00Z");
+  await store.saveLive([{ unit: "Київ", started: now - 60 * 3600000, ended: null, level: "red", max_level: "red" }], { last: 1, ok: now, gapTo: 0 });
+  const rows = await store.unitRecent("Київ", now);
+  assert.equal(rows.length, 1);
+  assert.equal(occupancy(rows, now, 24), 1);
 });

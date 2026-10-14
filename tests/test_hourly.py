@@ -96,3 +96,23 @@ def test_alert_history_is_what_the_worker_accepts():
     for unit, started, ended, level, top in b["alerts"]:
         assert b["since"] <= started <= b["data_end"] and (ended is None or started <= ended <= b["data_end"])
         assert level in ("red", "yellow", None) and top in ("red", "yellow", None)
+
+
+def test_training_rows_have_known_outcomes():
+    """Version 2 (PREREG 13): day d learns only from earlier issue days, targets before d 00:00 and inside the data
+    seen. Audit 7 removed the filter in a copy and every test stayed green; this one does not."""
+    d = pd.Timestamp("2026-10-10")
+    cut = H.kyiv_minute(d, 0)
+    mk = lambda day, xs: pd.DataFrame(dict(day=pd.Timestamp(day), x=xs))  # noqa: E731
+    pairs = {pd.Timestamp("2026-10-08"): mk("2026-10-08", [cut - 3000, cut + 60]),
+             pd.Timestamp("2026-10-09"): mk("2026-10-09", [cut - 600, cut - 10, cut + 600]),
+             d: mk("2026-10-10", [cut - 5])}                                # day d itself: never
+    t = H.training_frame(pairs, d, cover_end=cut - 300)                       # data end 5 h before midnight
+    assert (t.x < cut - 300).all() and (t.day < d).all()
+    assert sorted(t.x - cut) == [-3000, -600]
+    assert len(H.training_frame(pairs, d, cover_end=cut + 10_000)) == 3      # full data: all earlier targets < cut
+
+
+def test_km_grid_all_censored():
+    s = H.km_grid(np.array([1440.0]), np.array([False]))
+    assert (s[: H.CAP] == 1).all() and (s[H.CAP:] == 0).all()

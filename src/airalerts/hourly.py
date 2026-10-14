@@ -99,6 +99,8 @@ def km_grid(dur: np.ndarray, event: np.ndarray) -> np.ndarray:
     if not len(dur):
         return np.where(np.arange(GRID + 1) < CAP, 1.0, 0.0)
     times = np.unique(dur[event])
+    if not len(times):  # no finished alert at all: nothing ends before the cap (audit 7: this raised IndexError)
+        return np.where(np.arange(GRID + 1) < CAP, 1.0, 0.0)
     surv, s = [], 1.0
     for x in times:
         at_risk = (dur >= x).sum()
@@ -302,11 +304,11 @@ def logit(p: np.ndarray) -> np.ndarray:
 
 def occupancy(store: Store, units: list[str], t: float, hours: int) -> np.ndarray:
     """Share of the `hours` before t each unit spent under alert. Only chains that started before t, cut at t: what
-    was known at t (a chain is at most 24 h long, so older ones cannot overlap the window)."""
+    was known at t. Chains starting up to 7 days earlier are scanned: merged chains can exceed 24 h (audit 7)."""
     lo, out = t - hours * 60, np.zeros(len(units))
     for i, u in enumerate(units):
         s, e = store.starts[u], store.ends[u]
-        a, b = np.searchsorted(s, lo - CAP * STEP), np.searchsorted(s, t)
+        a, b = np.searchsorted(s, lo - 7 * 24 * 60), np.searchsorted(s, t)
         if b > a:
             out[i] = np.clip(np.minimum(e[a:b], t) - np.maximum(s[a:b], lo), 0, None).sum() / (hours * 60)
     return np.clip(out, 0, 1)
@@ -362,6 +364,16 @@ def day_pairs(store: Store, units: list[str], d: pd.Timestamp, end_min: float, e
     return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
 
 
+def training_frame(pairs: dict, d: pd.Timestamp, cover_end: float) -> pd.DataFrame:
+    """The rows day d may learn from: issued in the 14 days before d, target hour before 00:00 of d AND inside the
+    data actually seen (an unseen hour would be labelled "no alert"; audit 7). One function for the backtest and the
+    publisher, so both fit the same model."""
+    cut = min(kyiv_minute(d, 0), cover_end)
+    hist = pd.concat([pairs[d - pd.Timedelta(k, "D")] for k in range(TRAIN_DAYS, 0, -1)
+                      if (d - pd.Timedelta(k, "D")) in pairs], ignore_index=True)
+    return hist[(hist.x < cut) & (hist.day < d)]
+
+
 def fit_v2(train: pd.DataFrame, seed: int = 0) -> dict:
     """Coefficients per (state, bucket) from pairs whose outcome is known. Missing or one-class cells -> None
     (the caller falls back to H1)."""
@@ -398,9 +410,7 @@ def backtest_v2(store: Store, units: list[str], start: str = EVAL_FROM) -> pd.Da
     pairs = {d: day_pairs(store, units, d, end_min) for d in pd.date_range(first, last, freq="D")}
     recs = []
     for d in pd.date_range(start, last, freq="D"):
-        cut = kyiv_minute(d, 0)
-        hist = pd.concat([pairs[d - pd.Timedelta(k, "D")] for k in range(TRAIN_DAYS, 0, -1)], ignore_index=True)
-        coef = fit_v2(hist[hist.x < cut], seed=int(d.strftime("%Y%m%d")))
+        coef = fit_v2(training_frame(pairs, d, end_min), seed=int(d.strftime("%Y%m%d")))
         rows = pairs[d].reset_index(drop=True)
         p2 = predict_v2(coef, rows)
         y, p1, cl = rows.y.to_numpy(float), rows.p1.to_numpy(float), rows.clim.to_numpy(float)
@@ -411,29 +421,52 @@ def backtest_v2(store: Store, units: list[str], start: str = EVAL_FROM) -> pd.Da
     return pd.concat(recs, ignore_index=True)
 
 
-def coef_asof(store: Store, units: list[str], day: pd.Timestamp, every: int = 3) -> dict:
-    """What the publisher sends: coefficients fitted on the 14 days before `day` (issue hours every 3 h to keep
-    a GitHub Actions run short; the backtest uses every hour)."""
+def coef_asof(store: Store, units: list[str], day: pd.Timestamp, every: int = 1) -> dict | None:
+    """What the publisher sends: coefficients fitted exactly as in the backtest (every issue hour; audit 7 found that
+    sampling every 3 h fitted a different model). None if the data end more than 36 h before `day`: a stale fit is
+    not published, and the Worker then falls back to version 1 or history."""
     day = pd.Timestamp(day).normalize()
-    end_min, cut = kyiv_minute(day, 0), kyiv_minute(day, 0)
-    hist = pd.concat([day_pairs(store, units, day - pd.Timedelta(k, "D"), end_min, every)
-                      for k in range(TRAIN_DAYS, 0, -1)], ignore_index=True)
-    return fit_v2(hist[hist.x < cut], seed=int(day.strftime("%Y%m%d")))
+    cover_end = minute(store.coverage[1])
+    if cover_end < kyiv_minute(day, 0) - 36 * 60:
+        return None
+    pairs = {day - pd.Timedelta(k, "D"): day_pairs(store, units, day - pd.Timedelta(k, "D"), min(cover_end, kyiv_minute(day, 0)), every)
+             for k in range(TRAIN_DAYS, 0, -1)}
+    return fit_v2(training_frame(pairs, day, cover_end), seed=int(day.strftime("%Y%m%d")))
 
 
-def main_v2() -> None:
-    store = build_store(Path("data/raw/vadimkin/official_data_uk.csv"), Path("data/interim/telegram_episodes.parquet"))
+SNAPSHOT_V2 = Path("data/snapshot/telegram_episodes_2026-10-13.parquet")   # the exact data of the PREREG 13 run
+MANIFEST_V2 = Path("results/hourly_v2_manifest.json")
+
+
+def main_v2(episodes: Path = Path("data/interim/telegram_episodes.parquet"), check: bool = False) -> None:
+    """--v2: run the backtest and write results. --v2 --check: rerun on the committed snapshot and compare with the
+    committed summary and gates (scripts/reproduce.sh; audit 7 found the committed numbers were not reproducible)."""
+    import hashlib
+
+    store = build_store(Path("data/raw/vadimkin/official_data_uk.csv"), episodes)
     units = eligible_units(store)
     daily = backtest_v2(store, units)
-    daily.to_csv("results/posthoc_hourly_v2_daily.csv", index=False)
     summary = summarise(daily)
     vs_h1 = summarise(daily.assign(se_clim=daily.se_h1))[["state", "bucket", "bss", "ci_lo", "ci_hi"]]
     summary = summary.merge(vs_h1.rename(columns={"bss": "bss_vs_h1", "ci_lo": "vs_h1_lo", "ci_hi": "vs_h1_hi"}),
                             on=["state", "bucket"])
     h1 = daily.groupby(["state", "bucket"]).apply(lambda g: g.p_h1.sum() / g.n.sum(), include_groups=False)
     summary["mean_p_h1"] = [h1[(s, b)] for s, b in zip(summary.state, summary.bucket)]
+    if check:
+        ref = pd.read_csv("results/posthoc_hourly_v2_summary.csv")
+        cols = ["n", "bss", "ci_lo", "ci_hi", "bss_first_half", "bss_second_half", "bss_vs_h1"]
+        bad = [c for c in cols if not np.allclose(summary[cols].to_numpy(float), ref[cols].to_numpy(float), atol=1e-9)]
+        same_gates = gates(summary) == json.loads(GATES2.read_text(encoding="utf-8"))
+        if bad or not same_gates:
+            raise SystemExit(f"hourly v2: results differ from the committed ones ({bad}, gates equal: {same_gates})")
+        print("hourly v2: results match the committed ones")
+        return
+    daily.to_csv("results/posthoc_hourly_v2_daily.csv", index=False)
     summary.to_csv("results/posthoc_hourly_v2_summary.csv", index=False)
     GATES2.write_text(json.dumps(gates(summary), indent=1) + "\n", encoding="utf-8")
+    MANIFEST_V2.write_text(json.dumps(dict(episodes=str(episodes), sha256=hashlib.sha256(episodes.read_bytes()).hexdigest(),
+                                           coverage_end=str(store.coverage[1]), units=len(units),
+                                           forecasts=int(daily.n.sum())), indent=1) + "\n", encoding="utf-8")
     print(f"hourly risk v2 (PREREG 13), rolling {EVAL_FROM} → {daily.day.max():%Y-%m-%d}, {len(units)} units")
     print(summary[["state", "lead", "n", "alert_rate", "mean_p_h1", "mean_p_model", "bss", "ci_lo", "ci_hi",
                    "bss_first_half", "bss_second_half", "bss_vs_h1", "show_model"]].round(4).to_string(index=False))
@@ -451,9 +484,9 @@ def payload(store: Store, units: list[str], day: pd.Timestamp, gate: dict | None
                units={u: dict(clim=[round(float(x), 4) for x in par["clim"][i]],
                               prof=[round(float(x), 5) for x in prof[i]], ob=store.oblast_of[u]) for i, u in enumerate(units)},
                surv=[round(float(x), 5) for x in par["surv"]], gates=gate)
-    if v2 and GATES2.exists():
-        out["coef"] = {k: [None if c is None else [round(x, 6) for x in c] for c in v]
-                       for k, v in coef_asof(store, units, day).items()}
+    coef = coef_asof(store, units, day) if v2 and GATES2.exists() else None
+    if coef is not None:
+        out["coef"] = {k: [None if c is None else [round(x, 6) for x in c] for c in v] for k, v in coef.items()}
         out["gates2"] = json.loads(GATES2.read_text(encoding="utf-8"))
     return out
 
@@ -481,4 +514,8 @@ def main() -> None:
 if __name__ == "__main__":
     import sys
 
-    main_v2() if "--v2" in sys.argv else main()
+    if "--v2" in sys.argv:
+        ep = Path(sys.argv[sys.argv.index("--episodes") + 1]) if "--episodes" in sys.argv else Path("data/interim/telegram_episodes.parquet")
+        main_v2(ep, check="--check" in sys.argv)
+    else:
+        main()

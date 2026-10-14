@@ -95,16 +95,22 @@ export function hourRisk(params, unit, day, hour, now, live, feats = null) {
   const surv = params.surv;
   const hx = kyivHour(x), clim = u.clim[hx];
   const lead = (x - now) / MIN;
-  if (lead <= 0) return { past: true, clim };
+  if (lead <= 0) return { past: true, clim, asOf: params.as_of };
   const steps = Math.min(Math.floor(lead / step), surv.length - 1);
   const b = bucketOf(params.gates.buckets, lead / 60);
-  const out = { clim, lead, bucket: b, x, model: null, version: null };
-  if (!live) return out;
+  // reason: why history is shown instead of a model, so the screen can say it truthfully (audit 7)
+  const out = { clim, lead, bucket: b, x, model: null, version: null, asOf: params.as_of, reason: null };
+  const today = new Date(now + kyivOffset(now) * MIN).toISOString().slice(0, 10);
+  const yesterday = new Date(Date.parse(`${today}T12:00:00Z`) - 86400000).toISOString().slice(0, 10);
+  if (!live) { out.reason = "stale_live"; return out; }
+  if (lead < 60) { out.reason = "short"; return out; }               // backtested from 1 h on: never extrapolated to minutes
+  if (!params.as_of || params.as_of < yesterday) { out.reason = "stale_params"; return out; }
   const state = live.on ? "on" : "off";
   const c = coverageShare(u.prof, surv, x, step);
   const p1 = Math.min(1, Math.max(0, forecastOne(clim, c, surv, live.on, live.elapsed, steps, step)));
   const coef = params.coef?.[state]?.[b];
   if (feats && coef && params.gates2?.[state]?.[b]) { out.model = forecastV2(coef, p1, clim, feats, live.on, live.elapsed); out.version = 2; }
-  else if (params.gates[state][b]) { out.model = p1; out.version = 1; } // here the model is better than history
+  else if (params.gates[state][b]) { out.model = p1; out.version = 1; }
+  else out.reason = params.gates2?.[state]?.[b] && !coef ? "no_model" : "gate";
   return out;
 }

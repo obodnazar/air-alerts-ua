@@ -255,7 +255,12 @@ Rolling out of sample, 15 Sep – 13 Oct, it beats history up to 12 h ahead in b
 - **no alert now:** +7.1% [+4.8, +9.9] at 1 h, down to +1.6% [+0.2, +3.1] at 7–12 h;
 - **alert on:** +19.7% at 1 h.
 
-Its mean forecast now matches the observed rate (11.7% vs 12.2% at 1 h, no alert now; version 1 gave 8.7%). Beyond 12 h the bot still shows the history share, as a probability with its source. Results: [posthoc_hourly_v2_summary.csv](results/posthoc_hourly_v2_summary.csv); run: `python -m airalerts.hourly --v2`.
+Its mean forecast now matches the observed rate (11.7% vs 12.2% at 1 h, no alert now; version 1 gave 8.7%). Beyond 12 h the bot still shows the history share, as a probability with its source.
+
+A Codex audit of the maths (14 Oct) confirmed that log loss and calibration improve in all 14 cells. Its caveats:
+- after a multiplicity correction the claim holds for 1–6 h;
+- the bot shows no model less than 1 h ahead, because nothing was tested there;
+- a frozen 3-week evaluation (15 Oct – 4 Nov) is registered in PREREG item 13. Results: [posthoc_hourly_v2_summary.csv](results/posthoc_hourly_v2_summary.csv); run: `python -m airalerts.hourly --v2`.
 
 *Reproducibility note (audit 6).* These hourly numbers were computed from the raw scraped posts available on 12 Oct; the committed snapshot covers slightly fewer observations, so re-running `python -m airalerts.hourly` from a fresh clone gives close but not identical metrics (e.g. 1 h while an alert is on: BSS 0.161 vs 0.160) with the **same gates**. `scripts/reproduce.sh` checks the registered results, not these post-hoc ones.
 

@@ -98,7 +98,7 @@ export function invalidHourly(b, units = new Set(catalog.units)) {
     const g2 = b.gates2;
     if (!g2 || JSON.stringify(g2.buckets) !== JSON.stringify(g.buckets)
       || !["on", "off"].every((k) => isArr(g2[k], n, (v) => typeof v === "boolean"))) return "gates2";
-    if (names.some((u) => typeof b.units[u].ob !== "string" || b.units[u].ob.length > 80)) return "ob";
+    if (names.some((u) => typeof b.units[u].ob !== "string" || !b.units[u].ob.trim() || b.units[u].ob.length > 80)) return "ob";
   }
   return null;
 }

@@ -1,0 +1,8 @@
+{
+ "episodes": "data/snapshot/telegram_episodes_2026-10-13.parquet",
+ "sha256": "d1312f614e9aab1a4fa50d7b98b16f576b076019722495718e0be01ac249d675",
+ "coverage_end": "2026-10-13 17:25:55+00:00",
+ "units": 104,
+ "forecasts": 2495376,
+ "note": "data of the PREREG 13 run; checked by scripts/reproduce.sh"
+}

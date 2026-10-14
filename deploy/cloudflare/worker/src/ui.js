@@ -260,18 +260,25 @@ export function hourText(unit, d, hour, risk, live, seen, offsetMin) {
       `${live.stuck ? " (довше за добу: можливо, ми пропустили відбій)" : ""}.\n` +
       "<b>Будьте в укритті й слухайте офіційні сповіщення.</b> Не плануйте виходити до відбою.");
   } else parts.push(`Зараз: тривоги немає (дані на ${at}).`);
+  const window28 = risk?.asOf ? ` (28 днів до ${risk.asOf.slice(8, 10)}.${risk.asOf.slice(5, 7)})` : " (28 днів)";
+  const WHY = {
+    gate: "Для такого горизонту наша модель не точніша за історію, тому показуємо історичну оцінку.",
+    no_model: "Модель для цього випадку зараз не завантажена, тому показуємо історичну оцінку.",
+    stale_live: "Свіжих даних про «зараз» немає, тому оцінка лише за історією.",
+    short: "До цієї години менше години: модель перевірена від 1 години вперед, тому тут лише історія. Дивіться, чи є тривога зараз.",
+    stale_params: "Параметри моделі застаріли, тому оцінка лише за історією.",
+  };
   if (!risk) {
     parts.push("Для цього району ще немає даних по годинах.");
   } else if (risk.model != null) {
+    const src = risk.version === 2 ? "оцінка моделі: хвилі тривог зараз і історія району" : "оцінка моделі за історією району";
     parts.push(`Ймовірність, що о ${hh(hour)} буде тривога: <b>${pct(risk.model)}</b>\n${bar(risk.model)} ` +
-      `<i>зазвичай о ${hh(hour)}: ${pct(risk.clim)}</i>`);
+      `<i>${src}; зазвичай о ${hh(hour)}: ${pct(risk.clim)}</i>`);
   } else {
-    // where the model is not better than history, history IS the best estimate: show it as the probability, and say
-    // where it comes from (Nazar, 14 Oct: the screen must always give a percentage)
+    // history IS the estimate where no model is shown: given as the probability, with its source and the reason
     parts.push(`Ймовірність, що о ${hh(hour)} буде тривога: <b>≈${pct(risk.clim)}</b>\n${bar(risk.clim)} ` +
-      `<i>за історією району: о ${hh(hour)} тривога була у ${pct(risk.clim)} з останніх 28 днів</i>\n` +
-      (live ? "<i>Для такого проміжку наша модель не точніша за історію, тому показуємо історичну оцінку.</i>"
-        : "<i>Свіжих даних про «зараз» немає, тому оцінка лише за історією.</i>"));
+      `<i>за історією району: о ${hh(hour)} тривога була у ${pct(risk.clim)} днів${window28}</i>\n` +
+      `<i>${WHY[risk.reason] || WHY.gate}</i>`);
   }
   parts.push(PLANNING);
   return parts.join("\n\n");

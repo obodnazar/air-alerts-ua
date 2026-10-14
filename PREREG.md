@@ -183,3 +183,16 @@ Everything below was designed **after** the test results were seen. It is report
 
       - **What this means:** the wave features (how much of the last 6/24 h the raion spent under alert, and how much of the oblast and the country is under alert now) and the recalibration fix item 12's under-forecast. The mean forecast now matches the observed rate. For the first time the model also beats history **with no alert now**, up to 12 h ahead. Beyond 12 h nothing beats "how often there was an alert at that hour in the last 4 weeks".
       - **Caveats:** post-hoc; the same 4 weeks as item 12 plus one new day; the effect sizes are small beyond 3 h. Only 13 Oct is fully new data. The Worker computes the same formula from its own live scrape, so live wave features can differ slightly from the backtest's: `test/fixtures/hourly_v2_parity.json` checks the formula and the occupancy against Python.
+    - **Audit 7 (Codex, 14 Oct) and what changed before any new result:**
+      - **Version 1 is an approximation.** P_new is exact only for Poisson starts with independent durations. The "alert on" formula is an approximate renewal decomposition, and merged alert chains break independence. Version 2 corrects for this empirically, so it does not prove the formulas.
+      - **Collinearity.** logit(H1) and logit(clim) are highly collinear (VIF up to 8 500 at 7–12 h). The coefficients are not separate effects and are not interpreted.
+      - **Probability quality.** Log loss and ECE improve in all 14 cells, so this is calibration and not only Brier. A plain recalibration of H1 explains part of the gain, not all: with no alert, 1 h, +2.9% for the recalibration vs +7.1% for v2.
+      - **Multiplicity.** With a Bonferroni correction over the 14 cells, 8 of the 10 open cells stay positive; the two 7–12 h cells do not. Their gates stay open under the registered rule, but the claim is limited to 1–6 h.
+      - **The product now fits exactly the backtest's model.** The publisher fits on every issue hour, as the backtest does (it had sampled every 3 h), and only on targets inside the data actually seen. A fit on data more than 36 h old is not published.
+      - **The bot shows no model less than 1 h ahead.** Nothing was backtested there.
+      - **Reproducibility.** The data of this run are committed as `data/snapshot/telegram_episodes_2026-10-13.parquet` (hash in `results/hourly_v2_manifest.json`). `scripts/reproduce.sh` recomputes this item and checks it against the committed numbers.
+    - **Frozen evaluation (registered now, before the data exist):**
+      - The pipeline, features and gates are frozen at this commit.
+      - From **15 Oct to 4 Nov 2026** (3 weeks), the same rolling backtest will be run once, on data collected by the publisher, with no change to code or gates.
+      - It will report Brier skill vs history (CI as above), log loss and ECE per (state, bucket), plus the plain recalibration of H1 as a second baseline.
+      - The gates stay as they are unless that period's 95% CI for a cell is below 0. In that case the cell closes.
